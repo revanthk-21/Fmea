@@ -332,35 +332,6 @@ const FOCUS_CX = BX + BW / 2;
 const FOCUS_CY = BY + BH / 2;
 const FOCUS_W  = 160; const FOCUS_H = 44;
 
-function boxY(count: number, spacing: number, i: number): number {
-  const startY = BY + (BH - (count - 1) * spacing - BOX_H) / 2;
-  return startY + i * spacing;
-}
-
-function spacing(count: number, maxH: number): number {
-  return count > 1 ? Math.min(58, (maxH - BOX_H) / (count - 1)) : 0;
-}
-
-// Centre-point of each box
-function boxCentre(key: string, lowerNames: string[], higherNames: string[]) {
-  const lSp = spacing(lowerNames.length, BH - 60);
-  const hSp = spacing(higherNames.length, BH - 60);
-
-  if (key === "focus") {
-    return { x: FOCUS_CX, y: FOCUS_CY };
-  }
-  if (key.startsWith("lower-")) {
-    const i = parseInt(key.split("-")[1]);
-    const by = boxY(lowerNames.length, lSp, i);
-    return { x: L_X + BOX_W / 2, y: by + BOX_H / 2 };
-  }
-  if (key.startsWith("higher-")) {
-    const i = parseInt(key.split("-")[1]);
-    const by = boxY(higherNames.length, hSp, i);
-    return { x: H_X + BOX_W / 2, y: by + BOX_H / 2 };
-  }
-  return { x: 0, y: 0 };
-}
 
 // Build the arrowhead path for a connection line
 function arrowHead(x2: number, y2: number, x1: number, y1: number, size = 8) {
@@ -389,32 +360,135 @@ function midpoint(x1: number, y1: number, x2: number, y2: number) {
   return { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
 }
 
+// Build initial positions — spread boxes out with generous spacing so nothing overlaps
+function buildInitialPositions(
+  lowerNames: string[],
+  higherNames: string[],
+): Record<string, { x: number; y: number }> {
+  const pos: Record<string, { x: number; y: number }> = {};
+
+  // Focus box — centre of canvas
+  pos["focus"] = { x: FOCUS_CX - FOCUS_W / 2, y: FOCUS_CY - FOCUS_H / 2 };
+
+  // Lower boxes — evenly spaced left column, generous 60px vertical gap
+  const lGap  = 60;
+  const lTotalH = lowerNames.length * BOX_H + (lowerNames.length - 1) * lGap;
+  const lTop  = Math.max(BY + 20, FOCUS_CY - lTotalH / 2);
+  lowerNames.forEach((_, i) => {
+    pos[`lower-${i}`] = { x: L_X, y: lTop + i * (BOX_H + lGap) };
+  });
+
+  // Higher boxes — right column with same generous spacing
+  const hGap  = 60;
+  const hTotalH = higherNames.length * BOX_H + (higherNames.length - 1) * hGap;
+  const hTop  = Math.max(BY + 20, FOCUS_CY - hTotalH / 2);
+  higherNames.forEach((_, i) => {
+    pos[`higher-${i}`] = { x: H_X, y: hTop + i * (BOX_H + hGap) };
+  });
+
+  return pos;
+}
+
 function BDiagramSVG({
   focusName, lowerNames, higherNames,
 }: { focusName: string; lowerNames: string[]; higherNames: string[] }) {
-  const [conns, setConns]           = useState<BConn[]>([]);
-  const [pendingFrom, setPending]   = useState<string | null>(null);
+
+  // ── State ──────────────────────────────────────────────────────────────────
+
+  const [conns,      setConns]      = useState<BConn[]>([]);
+  const [pendingFrom,setPending]    = useState<string | null>(null);
   const [activeType, setActiveType] = useState<ConnType>("P");
-  const [hoveredBox, setHovered]    = useState<string | null>(null);
-  const [hoveredConn, setHovConn]   = useState<string | null>(null);
-  const svgRef = React.useRef<SVGSVGElement>(null);
+  const [hoveredConn,setHovConn]    = useState<string | null>(null);
+  const [mode,       setMode]       = useState<"connect" | "move">("move");
 
-  const lSp = spacing(lowerNames.length, BH - 60);
-  const hSp = spacing(higherNames.length, BH - 60);
+  // Box positions — keyed by box key ("focus", "lower-0", "higher-1" …)
+  const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>(
+    () => buildInitialPositions(lowerNames, higherNames)
+  );
 
-  // All clickable box keys
-  const allKeys = [
-    ...lowerNames.map((_, i) => `lower-${i}`),
-    "focus",
-    ...higherNames.map((_, i) => `higher-${i}`),
-  ];
+  // Rebuild positions if elements change (new names added/removed)
+  const lowerKey  = lowerNames.join("|");
+  const higherKey = higherNames.join("|");
+  const prevLower  = React.useRef(lowerKey);
+  const prevHigher = React.useRef(higherKey);
+  useEffect(() => {
+    if (prevLower.current !== lowerKey || prevHigher.current !== higherKey) {
+      setPositions(buildInitialPositions(lowerNames, higherNames));
+      prevLower.current  = lowerKey;
+      prevHigher.current = higherKey;
+    }
+  }, [lowerKey, higherKey]);
 
-  const handleBoxClick = (key: string) => {
+  // Drag state — stored in a ref to avoid re-renders during drag
+  const drag = React.useRef<{
+    key: string;
+    startMx: number; startMy: number;
+    startBx: number; startBy: number;
+  } | null>(null);
+
+  const svgRef    = React.useRef<SVGSVGElement>(null);
+  const isDragging = React.useRef(false);
+
+  // ── Helper: SVG coordinates from mouse event ───────────────────────────────
+
+  const svgPoint = (e: React.MouseEvent | MouseEvent): { x: number; y: number } => {
+    const svg = svgRef.current;
+    if (!svg) return { x: 0, y: 0 };
+    const rect  = svg.getBoundingClientRect();
+    const scaleX = W / rect.width;
+    const scaleY = H / rect.height;
+    return {
+      x: (e.clientX - rect.left) * scaleX,
+      y: (e.clientY - rect.top)  * scaleY,
+    };
+  };
+
+  // ── Box centre (reads from positions state) ────────────────────────────────
+
+  const centre = useCallback((key: string): { x: number; y: number } => {
+    const p = positions[key];
+    if (!p) return { x: 0, y: 0 };
+    if (key === "focus") return { x: p.x + FOCUS_W / 2, y: p.y + FOCUS_H / 2 };
+    return { x: p.x + BOX_W / 2, y: p.y + BOX_H / 2 };
+  }, [positions]);
+
+  // ── Drag handlers ──────────────────────────────────────────────────────────
+
+  const onBoxMouseDown = useCallback((e: React.MouseEvent, key: string) => {
+    if (mode !== "move") return;
+    e.stopPropagation();
+    isDragging.current = false;
+    const pt = svgPoint(e);
+    const p  = positions[key] ?? { x: 0, y: 0 };
+    drag.current = { key, startMx: pt.x, startMy: pt.y, startBx: p.x, startBy: p.y };
+  }, [mode, positions]);
+
+  const onSvgMouseMove = useCallback((e: React.MouseEvent) => {
+    if (!drag.current) return;
+    const pt = svgPoint(e);
+    const dx = pt.x - drag.current.startMx;
+    const dy = pt.y - drag.current.startMy;
+    if (Math.abs(dx) > 2 || Math.abs(dy) > 2) isDragging.current = true;
+    const key = drag.current.key;
+    const nx  = drag.current.startBx + dx;
+    const ny  = drag.current.startBy + dy;
+    setPositions(p => ({ ...p, [key]: { x: nx, y: ny } }));
+  }, []);
+
+  const onSvgMouseUp = useCallback(() => {
+    drag.current = null;
+  }, []);
+
+  // ── Click to connect ───────────────────────────────────────────────────────
+
+  const handleBoxClick = useCallback((key: string) => {
+    if (mode !== "connect") return;
+    if (isDragging.current) return;  // ignore click that ended a drag
+
     if (!pendingFrom) {
       setPending(key);
     } else {
       if (pendingFrom === key) { setPending(null); return; }
-      // Avoid duplicate
       const exists = conns.some(
         c => (c.fromKey === pendingFrom && c.toKey === key) ||
              (c.fromKey === key && c.toKey === pendingFrom)
@@ -424,26 +498,29 @@ function BDiagramSVG({
       }
       setPending(null);
     }
-  };
+  }, [mode, pendingFrom, conns, activeType]);
 
-  const removeConn = (id: string) => setConns(p => p.filter(c => c.id !== id));
-
+  const removeConn    = (id: string) => setConns(p => p.filter(c => c.id !== id));
   const changeConnType = (id: string, t: ConnType) =>
     setConns(p => p.map(c => c.id === id ? { ...c, type: t } : c));
 
-  // Download SVG (serialise with inline styles so foreignObject text renders)
+  // ── Download helpers ───────────────────────────────────────────────────────
+
   const downloadSVG = () => {
     if (!svgRef.current) return;
-    // Clone and strip foreignObject (not supported in all SVG viewers) → use <text> instead
     const clone = svgRef.current.cloneNode(true) as SVGSVGElement;
     clone.querySelectorAll("foreignObject").forEach(fo => {
       const text = fo.querySelector("div")?.textContent ?? "";
       const txt  = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      txt.setAttribute("x", String(parseFloat(fo.getAttribute("x") ?? "0") + parseFloat(fo.getAttribute("width") ?? "100") / 2));
-      txt.setAttribute("y", String(parseFloat(fo.getAttribute("y") ?? "0") + parseFloat(fo.getAttribute("height") ?? "20") / 2 + 4));
+      const fx   = parseFloat(fo.getAttribute("x") ?? "0");
+      const fy   = parseFloat(fo.getAttribute("y") ?? "0");
+      const fw   = parseFloat(fo.getAttribute("width") ?? "100");
+      const fh   = parseFloat(fo.getAttribute("height") ?? "20");
+      txt.setAttribute("x",           String(fx + fw / 2));
+      txt.setAttribute("y",           String(fy + fh / 2 + 4));
       txt.setAttribute("text-anchor", "middle");
-      txt.setAttribute("font-size", "10");
-      txt.setAttribute("fill", "#333");
+      txt.setAttribute("font-size",   "10");
+      txt.setAttribute("fill",        "#333");
       txt.setAttribute("font-family", "Arial, sans-serif");
       txt.textContent = text;
       fo.parentNode?.replaceChild(txt, fo);
@@ -458,12 +535,12 @@ function BDiagramSVG({
 
   const downloadPNG = () => {
     if (!svgRef.current) return;
-    const xml   = new XMLSerializer().serializeToString(svgRef.current);
-    const img   = new Image();
-    const scale = 2;
+    const xml = new XMLSerializer().serializeToString(svgRef.current);
+    const img = new Image();
     img.onload = () => {
+      const scale = 2;
       const canvas = document.createElement("canvas");
-      canvas.width  = W * scale; canvas.height = H * scale;
+      canvas.width = W * scale; canvas.height = H * scale;
       const ctx = canvas.getContext("2d")!;
       ctx.scale(scale, scale);
       ctx.fillStyle = "#ffffff";
@@ -480,58 +557,119 @@ function BDiagramSVG({
     img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(xml)}`;
   };
 
-  const isSelecting = pendingFrom !== null;
+  // ── Cursor logic ───────────────────────────────────────────────────────────
+
+  const svgCursor = drag.current ? "grabbing"
+    : mode === "move"    ? "grab"
+    : pendingFrom        ? "crosshair"
+    : "crosshair";
+
+  // ── Box renderer (shared for lower/higher/focus) ───────────────────────────
+
+  const renderBox = (
+    key: string,
+    label: string,
+    fill: string, fillPending: string,
+    stroke: string, strokeHov: string, strokePending: string,
+    textColor: string,
+  ) => {
+    const p          = positions[key] ?? { x: 0, y: 0 };
+    const isPending  = pendingFrom === key;
+    const isFocus    = key === "focus";
+    const bw         = isFocus ? FOCUS_W : BOX_W;
+    const bh         = isFocus ? FOCUS_H : BOX_H;
+
+    return (
+      <g key={key}
+        onMouseDown={e => onBoxMouseDown(e, key)}
+        onClick={() => handleBoxClick(key)}
+        style={{ cursor: mode === "move" ? (drag.current?.key === key ? "grabbing" : "grab") : "crosshair" }}
+      >
+        {/* Drag handle hint — subtle shadow */}
+        <rect x={p.x + 2} y={p.y + 3} width={bw} height={bh} rx={isFocus ? 8 : 6}
+          fill="rgba(0,0,0,0.06)" />
+        <rect x={p.x} y={p.y} width={bw} height={bh} rx={isFocus ? 8 : 6}
+          fill={isPending ? fillPending : fill}
+          stroke={isPending ? strokePending : strokeHov}
+          strokeWidth={isPending ? 2.5 : 1.8}
+        />
+        {/* Label via text (not foreignObject so SVG export works) */}
+        <text x={p.x + bw / 2} y={p.y + bh / 2 + 4}
+          textAnchor="middle" fontSize={10} fontWeight={isFocus ? "700" : "600"}
+          fill={textColor}>
+          {label.length > 20 ? label.slice(0, 18) + "…" : label}
+        </text>
+        {/* Move icon hint */}
+        {mode === "move" && (
+          <text x={p.x + bw - 10} y={p.y + 11} fontSize={8} fill={textColor} opacity={0.4}>⠿</text>
+        )}
+        {isPending && mode === "connect" && (
+          <text x={p.x + bw / 2} y={p.y + bh + 13}
+            textAnchor="middle" fontSize={8} fill={strokePending} fontStyle="italic">
+            selected — click another box
+          </text>
+        )}
+      </g>
+    );
+  };
+
+  // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
     <div className="space-y-3">
 
       {/* ── Toolbar ── */}
       <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div className="space-y-2">
 
-        {/* Connection type selector */}
-        <div className="space-y-1">
-          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-            Connection type to draw
-          </p>
-          <div className="flex gap-2 flex-wrap">
-            {(Object.entries(CONN_META) as [ConnType, typeof CONN_META[ConnType]][]).map(([t, meta]) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setActiveType(t)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all ${
-                  activeType === t
-                    ? "text-white shadow-sm"
-                    : "bg-white text-gray-600 border-gray-300 hover:border-gray-400"
-                }`}
-                style={activeType === t ? { background: meta.color, borderColor: meta.color } : {}}
-              >
-                <span
-                  className="inline-block w-5 h-0.5"
-                  style={{
-                    background: meta.color,
-                    borderTop: meta.dash ? `2px dashed ${activeType === t ? "white" : meta.color}` : undefined,
-                    height: meta.dash ? 0 : undefined,
-                  }}
-                />
-                {t} — {meta.label}
+          {/* Mode toggle */}
+          <div className="flex rounded-lg border overflow-hidden w-fit">
+            {(["move", "connect"] as const).map(m => (
+              <button key={m} type="button" onClick={() => { setMode(m); setPending(null); }}
+                className={`px-3 py-1.5 text-xs font-semibold transition-colors capitalize ${
+                  mode === m ? "bg-primary text-primary-foreground" : "bg-white text-gray-600 hover:bg-gray-50"
+                }`}>
+                {m === "move" ? "✥ Move boxes" : "⤢ Draw connections"}
               </button>
             ))}
           </div>
+
+          {/* Connection type pills — only shown in connect mode */}
+          {mode === "connect" && (
+            <div className="flex gap-2 flex-wrap">
+              {(Object.entries(CONN_META) as [ConnType, typeof CONN_META[ConnType]][]).map(([t, meta]) => (
+                <button key={t} type="button" onClick={() => setActiveType(t)}
+                  className={`flex items-center gap-1.5 px-3 py-1 rounded-lg border text-xs font-semibold transition-all ${
+                    activeType === t ? "text-white shadow-sm" : "bg-white text-gray-600 border-gray-300 hover:border-gray-400"
+                  }`}
+                  style={activeType === t ? { background: meta.color, borderColor: meta.color } : {}}>
+                  <span className="inline-block w-5"
+                    style={{ borderTop: `2px ${meta.dash ? "dashed" : "solid"} ${activeType === t ? "white" : meta.color}` }} />
+                  {t} — {meta.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Status + download */}
         <div className="flex items-center gap-2 flex-wrap">
-          {isSelecting ? (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 font-medium">
-              <span className="animate-pulse w-2 h-2 rounded-full bg-amber-500 inline-block" />
-              Click a second box to draw a {CONN_META[activeType].label} connection, or click the same box to cancel
-            </div>
-          ) : (
-            <div className="text-xs text-muted-foreground px-2">
-              Click any box to start a connection
-            </div>
+          {mode === "connect" && (
+            pendingFrom ? (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 font-medium">
+                <span className="animate-pulse w-2 h-2 rounded-full bg-amber-500 inline-block" />
+                Click a second box to draw a {CONN_META[activeType].label} connection
+              </div>
+            ) : (
+              <div className="text-xs text-muted-foreground px-2">Click any box to start a connection</div>
+            )
           )}
+          {mode === "move" && (
+            <div className="text-xs text-muted-foreground px-2">Drag any box to reposition it</div>
+          )}
+          <Button variant="outline" size="sm" onClick={() => setPositions(buildInitialPositions(lowerNames, higherNames))}>
+            Reset layout
+          </Button>
           <Button variant="outline" size="sm" onClick={downloadSVG}>
             <Download className="h-3.5 w-3.5 mr-1.5" />SVG
           </Button>
@@ -541,29 +679,31 @@ function BDiagramSVG({
           {conns.length > 0 && (
             <Button variant="ghost" size="sm" className="text-xs text-red-500 hover:text-red-700"
               onClick={() => setConns([])}>
-              Clear all connections
+              Clear connections
             </Button>
           )}
         </div>
       </div>
 
       {/* ── SVG canvas ── */}
-      <div className="overflow-x-auto rounded-xl border bg-white shadow-sm" style={{ cursor: isSelecting ? "crosshair" : "default" }}>
+      <div className="rounded-xl border bg-white shadow-sm overflow-hidden" style={{ cursor: svgCursor }}>
         <svg
           ref={svgRef}
           viewBox={`0 0 ${W} ${H}`}
-          style={{ minWidth: 700, width: "100%", fontFamily: "Arial, sans-serif" }}
+          style={{ width: "100%", display: "block", fontFamily: "Arial, sans-serif", minHeight: 320 }}
+          onMouseMove={onSvgMouseMove}
+          onMouseUp={onSvgMouseUp}
+          onMouseLeave={onSvgMouseUp}
         >
           <defs>
             {(Object.entries(CONN_META) as [ConnType, typeof CONN_META[ConnType]][]).map(([t, meta]) => (
-              <marker key={t} id={`arrow-${t}`} markerWidth="8" markerHeight="8"
-                refX="6" refY="4" orient="auto">
+              <marker key={t} id={`arrow-${t}`} markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
                 <path d="M0,0 L0,8 L8,4 Z" fill={meta.color} />
               </marker>
             ))}
           </defs>
 
-          {/* ── Boundary ── */}
+          {/* ── Focus system boundary ── */}
           <rect x={BX} y={BY} width={BW} height={BH} rx={16}
             fill="#EAF3FB" stroke="#3B82F6" strokeWidth={2} strokeDasharray="10,5" />
           <text x={BX + BW / 2} y={BY - 12} textAnchor="middle"
@@ -571,190 +711,74 @@ function BDiagramSVG({
             {(focusName || "FOCUS SYSTEM").toUpperCase()} — BOUNDARY
           </text>
 
-          {/* ── Connections ── */}
+          {/* ── Connections (drawn beneath boxes) ── */}
           {conns.map(conn => {
-            const from = boxCentre(conn.fromKey, lowerNames, higherNames);
-            const to   = boxCentre(conn.toKey,   lowerNames, higherNames);
+            const from  = centre(conn.fromKey);
+            const to    = centre(conn.toKey);
             const [x1, y1, x2, y2] = shortenLine(from.x, from.y, to.x, to.y, 22);
-            const mid  = midpoint(x1, y1, x2, y2);
-            const meta = CONN_META[conn.type];
+            const mid   = midpoint(x1, y1, x2, y2);
+            const meta  = CONN_META[conn.type];
             const isHov = hoveredConn === conn.id;
 
             return (
               <g key={conn.id}
                 onMouseEnter={() => setHovConn(conn.id)}
                 onMouseLeave={() => setHovConn(null)}
-                style={{ cursor: "pointer" }}
                 onClick={() => removeConn(conn.id)}
-              >
-                {/* Fat invisible hit area */}
+                style={{ cursor: "pointer" }}>
+                <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="transparent" strokeWidth={14} />
                 <line x1={x1} y1={y1} x2={x2} y2={y2}
-                  stroke="transparent" strokeWidth={14} />
-                {/* Visible line */}
-                <line x1={x1} y1={y1} x2={x2} y2={y2}
-                  stroke={meta.color}
-                  strokeWidth={isHov ? 2.5 : 1.8}
+                  stroke={meta.color} strokeWidth={isHov ? 2.5 : 1.8}
                   strokeDasharray={meta.dash}
                   markerEnd={`url(#arrow-${conn.type})`}
-                  opacity={isHov ? 1 : 0.85}
-                />
-                {/* Type label badge */}
+                  opacity={isHov ? 1 : 0.85} />
                 <rect x={mid.x - 14} y={mid.y - 8} width={28} height={16} rx={4}
-                  fill={isHov ? meta.color : "white"}
-                  stroke={meta.color} strokeWidth={1}
-                  opacity={0.95} />
+                  fill={isHov ? meta.color : "white"} stroke={meta.color} strokeWidth={1} />
                 <text x={mid.x} y={mid.y + 4} textAnchor="middle"
-                  fontSize={9} fontWeight="700"
-                  fill={isHov ? "white" : meta.color}>
+                  fontSize={9} fontWeight="700" fill={isHov ? "white" : meta.color}>
                   {conn.type}
                 </text>
-                {/* × on hover */}
                 {isHov && (
-                  <text x={mid.x + 18} y={mid.y + 4} fontSize={11}
-                    fill="#ef4444" fontWeight="700" cursor="pointer">×</text>
+                  <text x={mid.x + 18} y={mid.y + 4} fontSize={12} fill="#ef4444" fontWeight="700">×</text>
                 )}
               </g>
             );
           })}
-
-          {/* ── Focus system box ── */}
-          {(() => {
-            const key = "focus";
-            const isPending = pendingFrom === key;
-            const isHov = hoveredBox === key;
-            return (
-              <g key="focus"
-                onClick={() => handleBoxClick(key)}
-                onMouseEnter={() => setHovered(key)}
-                onMouseLeave={() => setHovered(null)}
-                style={{ cursor: "pointer" }}>
-                <rect
-                  x={FOCUS_CX - FOCUS_W / 2} y={FOCUS_CY - FOCUS_H / 2}
-                  width={FOCUS_W} height={FOCUS_H} rx={8}
-                  fill={isPending ? "#BFDBFE" : "#DBEAFE"}
-                  stroke={isPending ? "#1d4ed8" : isHov ? "#3B82F6" : "#60a5fa"}
-                  strokeWidth={isPending ? 2.5 : 1.8}
-                />
-                <text x={FOCUS_CX} y={FOCUS_CY + 5} textAnchor="middle"
-                  fontSize={11} fontWeight="700" fill="#1e3a5f">
-                  {focusName || "Focus System"}
-                </text>
-                {isPending && (
-                  <text x={FOCUS_CX} y={FOCUS_CY + FOCUS_H / 2 + 13}
-                    textAnchor="middle" fontSize={8} fill="#1d4ed8" fontStyle="italic">
-                    selected — click another box
-                  </text>
-                )}
-              </g>
-            );
-          })()}
 
           {/* ── Lower element boxes ── */}
-          {lowerNames.map((name, i) => {
-            const key = `lower-${i}`;
-            const by  = boxY(lowerNames.length, lSp, i);
-            const isPending = pendingFrom === key;
-            const isHov     = hoveredBox === key;
-            return (
-              <g key={key}
-                onClick={() => handleBoxClick(key)}
-                onMouseEnter={() => setHovered(key)}
-                onMouseLeave={() => setHovered(null)}
-                style={{ cursor: "pointer" }}>
-                <rect x={L_X} y={by} width={BOX_W} height={BOX_H} rx={6}
-                  fill={isPending ? "#E9D5FF" : "#F3E8FF"}
-                  stroke={isPending ? "#7e22ce" : isHov ? "#9333EA" : "#c084fc"}
-                  strokeWidth={isPending ? 2.5 : 1.5} />
-                <foreignObject x={L_X + 4} y={by + 2} width={BOX_W - 8} height={BOX_H - 4}>
-                  <div xmlns="http://www.w3.org/1999/xhtml"
-                    style={{ fontSize: 10, color: "#4B0082", textAlign: "center",
-                             lineHeight: 1.25, padding: "4px 2px", userSelect: "none" }}>
-                    {name}
-                  </div>
-                </foreignObject>
-                {isPending && (
-                  <text x={L_X + BOX_W / 2} y={by + BOX_H + 12}
-                    textAnchor="middle" fontSize={8} fill="#7e22ce" fontStyle="italic">
-                    selected
-                  </text>
-                )}
-              </g>
-            );
-          })}
-
-          {/* Lower label */}
-          {lowerNames.length > 0 && (
-            <text x={L_X + BOX_W / 2}
-              y={boxY(lowerNames.length, lSp, lowerNames.length - 1) + BOX_H + (pendingFrom?.startsWith("lower") ? 22 : 18)}
-              textAnchor="middle" fontSize={8} fill="#9333EA" fontStyle="italic">
-              Lower-level elements
-            </text>
+          {lowerNames.map((name, i) =>
+            renderBox(`lower-${i}`, name,
+              "#F3E8FF", "#E9D5FF", "#c084fc", "#9333EA", "#7e22ce", "#4B0082")
           )}
 
-          {/* ── Higher element boxes ── */}
-          {higherNames.map((name, i) => {
-            const key = `higher-${i}`;
-            const by  = boxY(higherNames.length, hSp, i);
-            const isPending = pendingFrom === key;
-            const isHov     = hoveredBox === key;
-            return (
-              <g key={key}
-                onClick={() => handleBoxClick(key)}
-                onMouseEnter={() => setHovered(key)}
-                onMouseLeave={() => setHovered(null)}
-                style={{ cursor: "pointer" }}>
-                <rect x={H_X} y={by} width={BOX_W} height={BOX_H} rx={6}
-                  fill={isPending ? "#D1FAE5" : "#ECFDF5"}
-                  stroke={isPending ? "#065f46" : isHov ? "#059669" : "#6ee7b7"}
-                  strokeWidth={isPending ? 2.5 : 1.5} />
-                <foreignObject x={H_X + 4} y={by + 2} width={BOX_W - 8} height={BOX_H - 4}>
-                  <div xmlns="http://www.w3.org/1999/xhtml"
-                    style={{ fontSize: 10, color: "#064E3B", textAlign: "center",
-                             lineHeight: 1.25, padding: "4px 2px", userSelect: "none" }}>
-                    {name}
-                  </div>
-                </foreignObject>
-                {isPending && (
-                  <text x={H_X + BOX_W / 2} y={by + BOX_H + 12}
-                    textAnchor="middle" fontSize={8} fill="#065f46" fontStyle="italic">
-                    selected
-                  </text>
-                )}
-              </g>
-            );
-          })}
+          {/* ── Focus system box ── */}
+          {renderBox("focus", focusName || "Focus System",
+            "#DBEAFE", "#BFDBFE", "#60a5fa", "#3B82F6", "#1d4ed8", "#1e3a5f")}
 
-          {/* Higher label */}
-          {higherNames.length > 0 && (
-            <text x={H_X + BOX_W / 2}
-              y={boxY(higherNames.length, hSp, higherNames.length - 1) + BOX_H + (pendingFrom?.startsWith("higher") ? 22 : 18)}
-              textAnchor="middle" fontSize={8} fill="#059669" fontStyle="italic">
-              Higher-level elements
-            </text>
+          {/* ── Higher element boxes ── */}
+          {higherNames.map((name, i) =>
+            renderBox(`higher-${i}`, name,
+              "#ECFDF5", "#D1FAE5", "#6ee7b7", "#059669", "#065f46", "#064E3B")
           )}
 
           {/* ── Legend ── */}
           {(() => {
-            const LY = BY + BH + 36;
+            const LY = BY + BH + 32;
             const entries = Object.entries(CONN_META) as [ConnType, typeof CONN_META[ConnType]][];
-            const gap = (W - 60) / entries.length;
+            const gap = (W - 80) / entries.length;
             return (
               <g>
-                <rect x={30} y={LY - 10} width={W - 60} height={40} rx={8}
+                <rect x={30} y={LY - 8} width={W - 60} height={38} rx={8}
                   fill="#F9FAFB" stroke="#E5E7EB" strokeWidth={1} />
                 {entries.map(([t, meta], idx) => {
-                  const lx = 55 + idx * gap;
+                  const lx = 56 + idx * gap;
                   return (
                     <g key={t}>
-                      <line x1={lx} y1={LY + 10} x2={lx + 24} y2={LY + 10}
+                      <line x1={lx} y1={LY + 11} x2={lx + 22} y2={LY + 11}
                         stroke={meta.color} strokeWidth={2} strokeDasharray={meta.dash} />
-                      <path d={arrowHead(lx + 24, LY + 10, lx, LY + 10, 6)} fill={meta.color} />
-                      <text x={lx + 30} y={LY + 14} fontSize={9} fill="#374151" fontWeight="600">
-                        {t}
-                      </text>
-                      <text x={lx + 42} y={LY + 14} fontSize={9} fill="#6B7280">
-                        — {meta.label}
-                      </text>
+                      <path d={arrowHead(lx + 22, LY + 11, lx, LY + 11, 5)} fill={meta.color} />
+                      <text x={lx + 28} y={LY + 15} fontSize={9} fill="#374151" fontWeight="600">{t}</text>
+                      <text x={lx + 40} y={LY + 15} fontSize={9} fill="#6B7280"> — {meta.label}</text>
                     </g>
                   );
                 })}
@@ -769,44 +793,33 @@ function BDiagramSVG({
         <div className="border rounded-xl overflow-hidden">
           <div className="bg-muted/30 px-4 py-2 border-b">
             <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Connections ({conns.length}) — click a connection on the diagram or the × below to remove
+              Connections ({conns.length}) — hover + click on the diagram, or use × below to remove
             </p>
           </div>
           <div className="divide-y">
             {conns.map(conn => {
-              const meta = CONN_META[conn.type];
-              const fromLabel = conn.fromKey === "focus" ? focusName
-                : conn.fromKey.startsWith("lower-") ? lowerNames[parseInt(conn.fromKey.split("-")[1])]
-                : higherNames[parseInt(conn.fromKey.split("-")[1])];
-              const toLabel = conn.toKey === "focus" ? focusName
-                : conn.toKey.startsWith("lower-") ? lowerNames[parseInt(conn.toKey.split("-")[1])]
-                : higherNames[parseInt(conn.toKey.split("-")[1])];
+              const meta      = CONN_META[conn.type];
+              const nameOf    = (k: string) => k === "focus" ? focusName
+                : k.startsWith("lower-")  ? lowerNames[parseInt(k.split("-")[1])]
+                : higherNames[parseInt(k.split("-")[1])];
 
               return (
                 <div key={conn.id}
                   className="flex items-center justify-between px-4 py-2 hover:bg-muted/20 transition-colors">
                   <div className="flex items-center gap-3 text-sm min-w-0">
-                    <span
-                      className="shrink-0 px-2 py-0.5 rounded text-xs font-bold text-white"
-                      style={{ background: meta.color }}>
-                      {conn.type}
-                    </span>
-                    <span className="truncate text-gray-700 font-medium">{fromLabel}</span>
+                    <span className="shrink-0 px-2 py-0.5 rounded text-xs font-bold text-white"
+                      style={{ background: meta.color }}>{conn.type}</span>
+                    <span className="truncate text-gray-700 font-medium">{nameOf(conn.fromKey)}</span>
                     <span className="text-gray-400 shrink-0">↔</span>
-                    <span className="truncate text-gray-700 font-medium">{toLabel}</span>
+                    <span className="truncate text-gray-700 font-medium">{nameOf(conn.toKey)}</span>
                     <span className="text-xs text-muted-foreground shrink-0">({meta.label})</span>
                   </div>
                   <div className="flex items-center gap-1 shrink-0 ml-2">
-                    {/* Change type buttons */}
                     {(Object.keys(CONN_META) as ConnType[]).filter(t => t !== conn.type).map(t => (
-                      <button key={t}
-                        type="button"
-                        title={`Change to ${CONN_META[t].label}`}
+                      <button key={t} type="button" title={`Change to ${CONN_META[t].label}`}
                         onClick={() => changeConnType(conn.id, t)}
                         className="w-5 h-5 rounded text-[9px] font-bold text-white flex items-center justify-center"
-                        style={{ background: CONN_META[t].color }}>
-                        {t}
-                      </button>
+                        style={{ background: CONN_META[t].color }}>{t}</button>
                     ))}
                     <Button variant="ghost" size="icon" className="h-6 w-6 text-red-400 hover:text-red-600"
                       onClick={() => removeConn(conn.id)}>

@@ -7,7 +7,7 @@ Run: uvicorn main:app --reload --port 8000
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import failure_modes, failure_causes, failure_effects, risk_rating
+from routers import failure_modes, failure_causes, failure_effects, risk_rating, diagrams
 
 app = FastAPI(title="DFMEA API", version="1.0.0")
 
@@ -22,6 +22,7 @@ app.include_router(failure_modes.router,   prefix="/api/dfmea")
 app.include_router(failure_causes.router,  prefix="/api/dfmea")
 app.include_router(failure_effects.router, prefix="/api/dfmea")
 app.include_router(risk_rating.router,     prefix="/api/dfmea")
+app.include_router(diagrams.router,        prefix="/api/dfmea")
 
 
 @app.get("/health")

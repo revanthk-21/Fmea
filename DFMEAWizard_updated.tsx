@@ -83,6 +83,76 @@ type DFMEARow = {
   detection_answer:   string;
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// IFMEA TYPES
+// ─────────────────────────────────────────────────────────────────────────────
+
+type IFMEAInterface = {
+  id:              string;   // same id as the BConn it came from
+  fromElement:     string;
+  toElement:       string;
+  connType:        ConnType;
+  nominalTransfer: string;   // user-typed: what is transferred
+  modes:           IFMEAModeRec[];
+  modesLoading:    boolean;
+  modesGenerated:  boolean;
+};
+
+type IFMEAModeRec = {
+  id:       string;
+  mode:     string;
+  selected: boolean;
+};
+
+type IFMEACauseItem = {
+  id:                 string;
+  cause:              string;
+  noise_category:     string;
+  noise_factor:       string;
+  selected:           boolean;
+  prevention_methods: string;
+  detection_methods:  string;
+  occurrence_answer:  string;
+  detection_answer:   string;
+  occurrence?:        number;
+  detection?:         number;
+  rpn?:               number;
+  action_priority?:   string;
+};
+
+type IFMEACauseGroup = {
+  interfaceId:     string;
+  fromElement:     string;
+  toElement:       string;
+  connType:        ConnType;
+  nominalTransfer: string;
+  failureMode:     string;
+  causes:          IFMEACauseItem[];
+};
+
+type IFMEARow = {
+  id:                 string;
+  from_element:       string;
+  to_element:         string;
+  conn_type:          string;
+  nominal_transfer:   string;
+  failure_mode:       string;
+  failure_cause:      string;
+  noise_factor:       string;
+  effect_on_receiver: string;
+  effect_on_sender:   string;
+  severity:           number | undefined;
+  prevention_methods: string;
+  detection_methods:  string;
+  occurrence:         number | undefined;
+  detection:          number | undefined;
+  rpn:                number | undefined;
+  action_priority:    string;
+  occurrence_answer:  string;
+  detection_answer:   string;
+};
+
+
 // P-Diagram state type
 type PDiagramState = {
   // Noise categories (5 standard columns) — these feed the Noise step
@@ -104,6 +174,19 @@ type PDiagramState = {
   unintendedOutputs:       string[];
 };
 
+// Interface Matrix — stores P/E/I/M rating (-2..+2) per element pair
+// Key format: "fromElement::toElement"
+type MatrixCell = {
+  P: number | null;  // Physical
+  E: number | null;  // Energy
+  I: number | null;  // Information
+  M: number | null;  // Material
+};
+type InterfaceMatrix = Record<string, MatrixCell>;   // key = "A::B"
+
+function matrixKey(a: string, b: string) { return `${a}::${b}`; }
+function emptyCell(): MatrixCell { return { P: null, E: null, I: null, M: null }; }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -111,15 +194,16 @@ type PDiagramState = {
 const SIMILARITY_DEFAULTS = { TOP_K_LOWER: 3, TOP_K_HIGHER: 2, THRESHOLD: 0.55 };
 
 const STEPS = [
-  "Elements",
-  "B-Diagram",
-  "Functions",
-  "P-Diagram",
-  "Connections",
-  "Failure Modes",
-  "Failure Causes",
-  "Risk Rating",
-  "Review & Export",
+  "Elements",       // 0
+  "B-Diagram",      // 1
+  "IFMEA",          // 2  ← new
+  "Functions",      // 3
+  "P-Diagram",      // 4
+  "Connections",    // 5
+  "Failure Modes",  // 6
+  "Failure Causes", // 7
+  "Risk Rating",    // 8
+  "Review & Export",// 9
 ];
 
 const OCCURRENCE_OPTIONS = [
@@ -390,12 +474,16 @@ function buildInitialPositions(
 }
 
 function BDiagramSVG({
-  focusName, lowerNames, higherNames,
-}: { focusName: string; lowerNames: string[]; higherNames: string[] }) {
+  focusName, lowerNames, higherNames, conns, setConns,
+}: {
+  focusName:  string;
+  lowerNames: string[];
+  higherNames: string[];
+  conns:    BConn[];
+  setConns: React.Dispatch<React.SetStateAction<BConn[]>>;
+}) {
 
-  // ── State ──────────────────────────────────────────────────────────────────
-
-  const [conns,      setConns]      = useState<BConn[]>([]);
+  // ── State (conns lifted to parent) ─────────────────────────────────────────
   const [pendingFrom,setPending]    = useState<string | null>(null);
   const [activeType, setActiveType] = useState<ConnType>("P");
   const [hoveredConn,setHovConn]    = useState<string | null>(null);
@@ -1018,7 +1106,40 @@ function DFMEAWizard() {
   const [focusElement,   setFocusElement]   = useState<Element | null>(null);
   const [higherElements, setHigherElements] = useState<Element[]>([]);
 
-  // ── Step 2 ── Functions
+  // ── Step 1 ── B-Diagram — lifted so IFMEA step can read them
+  const [bConns, setBConns] = useState<BConn[]>([]);
+
+  // ── Step 2 ── IFMEA
+  const [ifmeaInterfaces,      setIfmeaInterfaces]      = useState<IFMEAInterface[]>([]);
+  const [ifmeaCauseGroups,     setIfmeaCauseGroups]     = useState<IFMEACauseGroup[]>([]);
+  const [ifmeaCausesLoading,   setIfmeaCausesLoading]   = useState(false);
+  const [ifmeaCausesGenerated, setIfmeaCausesGenerated] = useState(false);
+  const [ifmeaRows,            setIfmeaRows]            = useState<IFMEARow[]>([]);
+  const [ifmeaRowsLoading,     setIfmeaRowsLoading]     = useState(false);
+  const [ifmeaPhase,           setIfmeaPhase]           = useState<"matrix"|"modes"|"causes"|"rate">("matrix");
+  const [ifmeaMatrix,          setIfmeaMatrix]          = useState<InterfaceMatrix>({});
+  const [reviewTab,            setReviewTab]            = useState<"dfmea"|"ifmea">("dfmea");
+
+  // Sync bConns → ifmeaInterfaces (preserves existing nominalTransfer/modes)
+  useEffect(() => {
+    setIfmeaInterfaces(prev => {
+      const existing = Object.fromEntries(prev.map(i => [i.id, i]));
+      const lN = lowerElements.map(e => e.name);
+      const hN = higherElements.map(e => e.name);
+      const nameOf = (k: string) =>
+        k === "focus"            ? (focusElement?.name ?? "Focus System")
+        : k.startsWith("lower-") ? (lN[parseInt(k.split("-")[1])] ?? k)
+        : (hN[parseInt(k.split("-")[1])] ?? k);
+      return bConns.map(conn => existing[conn.id] ?? {
+        id: conn.id, fromElement: nameOf(conn.fromKey), toElement: nameOf(conn.toKey),
+        connType: conn.type, nominalTransfer: "",
+        modes: [], modesLoading: false, modesGenerated: false,
+      });
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(bConns.map(c => c.id + c.type))]);
+
+  // ── Step 3 ── Functions
   const [functions, setFunctions] = useState<Func[]>([]);
   const focusFunctions  = useMemo(() => functions.filter(f => f.level === "focus"),  [functions]);
   const lowerFunctions  = useMemo(() => functions.filter(f => f.level === "lower"),  [functions]);
@@ -1062,22 +1183,22 @@ function DFMEAWizard() {
     return result;
   }, [pDiagram.noiseCategories]);
 
-  // ── Step 4 ── Connections
+  // ── Step 5 ── Connections
   const [connections, setConnections] = useState<Connections>({ lower_to_focus: [], focus_to_higher: [] });
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [suggestApplied, setSuggestApplied] = useState(false);
 
-  // ── Step 5 ── Failure modes
+  // ── Step 6 ── Failure modes
   const [modesByFocus, setModesByFocus] = useState<
     Record<string, { options: string[]; selected: Set<string>; loading: boolean }>
   >({});
 
-  // ── Step 6 ── Cause groups
+  // ── Step 7 ── Cause groups
   const [causeGroups,     setCauseGroups]     = useState<CauseGroup[]>([]);
   const [causesLoading,   setCausesLoading]   = useState(false);
   const [causesGenerated, setCausesGenerated] = useState(false);
 
-  // ── Step 8 ── Final rows
+  // ── Step 9 ── Final rows
   const [rows,        setRows]        = useState<DFMEARow[]>([]);
   const [rowsLoading, setRowsLoading] = useState(false);
 
@@ -1167,11 +1288,235 @@ function DFMEAWizard() {
   };
 
   useEffect(() => {
-    if (step === 4 && !suggestApplied && (lowerFunctions.length || higherFunctions.length)) {
+    if (step === 5 && !suggestApplied && (lowerFunctions.length || higherFunctions.length)) {
       fetchAndApplySuggestions();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
+
+
+  // ── IFMEA helpers ────────────────────────────────────────────────────────────
+
+  // ── Interface matrix helpers ────────────────────────────────────────────────
+
+  const setMatrixCell = (from: string, to: string, type: ConnType, val: number | null) => {
+    const k = matrixKey(from, to);
+    setIfmeaMatrix(prev => ({
+      ...prev,
+      [k]: { ...(prev[k] ?? emptyCell()), [type]: val },
+    }));
+  };
+
+  // Derive all unique element names for matrix axes (lower + focus + higher)
+  const allElementNames = useMemo(() => {
+    const names = new Set<string>();
+    lowerElements.forEach(e => { if (e.name) names.add(e.name); });
+    if (focusElement?.name) names.add(focusElement.name);
+    higherElements.forEach(e => { if (e.name) names.add(e.name); });
+    names.add("Environment"); // always include environment as standard IFMEA axis
+    return Array.from(names);
+  }, [lowerElements, focusElement, higherElements]);
+
+  const updateIfmeaTransfer = (id: string, val: string) =>
+    setIfmeaInterfaces(p => p.map(i => i.id === id ? { ...i, nominalTransfer: val } : i));
+
+  const fetchIfmeaModes = async (iface: IFMEAInterface) => {
+    setIfmeaInterfaces(p => p.map(i => i.id === iface.id ? { ...i, modesLoading: true } : i));
+    try {
+      const r = await fetch(`${apiBase}/api/ifmea/interface-failure-modes`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_element: iface.fromElement, to_element: iface.toElement,
+          connection_type: iface.connType, nominal_transfer: iface.nominalTransfer,
+          focus_element: focusElement?.name ?? "",
+        }),
+      });
+      const data = await r.json();
+      const modes: IFMEAModeRec[] = (data.failure_modes ?? []).map((m: string) => ({
+        id: uid("im"), mode: m, selected: false,
+      }));
+      setIfmeaInterfaces(p => p.map(i => i.id === iface.id
+        ? { ...i, modes, modesLoading: false, modesGenerated: true } : i));
+    } catch {
+      setIfmeaInterfaces(p => p.map(i => i.id === iface.id ? { ...i, modesLoading: false } : i));
+    }
+  };
+
+  const toggleIfmeaMode = (ifaceId: string, modeId: string) =>
+    setIfmeaInterfaces(p => p.map(i => i.id !== ifaceId ? i : {
+      ...i, modes: i.modes.map(m => m.id === modeId ? { ...m, selected: !m.selected } : m),
+    }));
+
+  const generateIfmeaCauses = async () => {
+    setIfmeaCausesLoading(true); setIfmeaCausesGenerated(false); setIfmeaCauseGroups([]);
+    const groups: IFMEACauseGroup[] = [];
+    const cleanNoise = Object.fromEntries(
+      Object.entries(noiseFromPDiagram).map(([k, arr]) => [k, arr.filter(Boolean)])
+    );
+    for (const iface of ifmeaInterfaces) {
+      const selectedModes = iface.modes.filter(m => m.selected).map(m => m.mode);
+      if (!selectedModes.length || !iface.nominalTransfer.trim()) continue;
+      try {
+        const r = await fetch(`${apiBase}/api/ifmea/interface-causes/bulk`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            from_element: iface.fromElement, to_element: iface.toElement,
+            connection_type: iface.connType, nominal_transfer: iface.nominalTransfer,
+            failure_modes: selectedModes, noise_factors: cleanNoise,
+          }),
+        });
+        const data = await r.json();
+        for (const g of data.groups ?? []) {
+          groups.push({
+            interfaceId: iface.id, fromElement: iface.fromElement,
+            toElement: iface.toElement, connType: iface.connType,
+            nominalTransfer: iface.nominalTransfer, failureMode: g.failure_mode,
+            causes: (g.causes ?? []).map((c: { cause: string; noise_category: string; noise_factor: string }) => ({
+              id: uid("ic"), cause: c.cause, noise_category: c.noise_category,
+              noise_factor: c.noise_factor, selected: false,
+              prevention_methods: "", detection_methods: "",
+              occurrence_answer: "", detection_answer: "",
+            })),
+          });
+        }
+      } catch (e) { console.error("IFMEA cause gen failed:", iface.id, e); }
+    }
+    setIfmeaCauseGroups(groups); setIfmeaCausesLoading(false); setIfmeaCausesGenerated(true);
+  };
+
+  const toggleIfmeaCause = (gi: number, cId: string) =>
+    setIfmeaCauseGroups(p => p.map((g, i) => i !== gi ? g : {
+      ...g, causes: g.causes.map(c => c.id === cId ? { ...c, selected: !c.selected } : c),
+    }));
+
+  const updateIfmeaCauseField = (gi: number, cId: string, field: keyof IFMEACauseItem, val: string) =>
+    setIfmeaCauseGroups(p => p.map((g, i) => i !== gi ? g : {
+      ...g, causes: g.causes.map(c => c.id === cId ? { ...c, [field]: val } : c),
+    }));
+
+  const ifmeaTotalSelected = useMemo(
+    () => ifmeaCauseGroups.reduce((a, g) => a + g.causes.filter(c => c.selected).length, 0),
+    [ifmeaCauseGroups]
+  );
+  const ifmeaTotalRated = useMemo(
+    () => ifmeaCauseGroups.reduce(
+      (a, g) => a + g.causes.filter(c => c.selected && c.occurrence_answer && c.detection_answer).length, 0),
+    [ifmeaCauseGroups]
+  );
+
+  const buildIfmeaRows = async () => {
+    setIfmeaRowsLoading(true);
+    const draft: IFMEARow[] = [];
+    for (const group of ifmeaCauseGroups) {
+      for (const cause of group.causes.filter(c => c.selected)) {
+        const rated = cause.occurrence_answer && cause.detection_answer
+          ? computeRating(cause.occurrence_answer, cause.detection_answer, 5)
+          : { occurrence: undefined, detection: undefined, rpn: undefined, action_priority: "" };
+        draft.push({
+          id: uid("ir"), from_element: group.fromElement, to_element: group.toElement,
+          conn_type: group.connType, nominal_transfer: group.nominalTransfer,
+          failure_mode: group.failureMode, failure_cause: cause.cause,
+          noise_factor: `${cause.noise_category}: ${cause.noise_factor}`,
+          effect_on_receiver: "", effect_on_sender: "",
+          severity: undefined, prevention_methods: cause.prevention_methods,
+          detection_methods: cause.detection_methods,
+          occurrence: rated.occurrence, detection: rated.detection,
+          rpn: rated.rpn, action_priority: rated.action_priority ?? "",
+          occurrence_answer: cause.occurrence_answer, detection_answer: cause.detection_answer,
+        });
+      }
+    }
+    if (draft.length) {
+      try {
+        const r = await fetch(`${apiBase}/api/ifmea/interface-effects/bulk`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            rows: draft.map(row => ({
+              row_id: row.id, from_element: row.from_element, to_element: row.to_element,
+              connection_type: row.conn_type, nominal_transfer: row.nominal_transfer,
+              failure_mode: row.failure_mode,
+            })),
+          }),
+        });
+        const data = await r.json();
+        const effMap: Record<string, { effect_on_receiver: string; effect_on_sender: string }> = {};
+        for (const res of data.results ?? []) effMap[res.row_id] = res;
+        draft.forEach(row => {
+          if (effMap[row.id]) {
+            row.effect_on_receiver = effMap[row.id].effect_on_receiver;
+            row.effect_on_sender   = effMap[row.id].effect_on_sender;
+          }
+        });
+      } catch (e) { console.error("IFMEA effects failed:", e); }
+    }
+    if (draft.length) {
+      try {
+        const r = await fetch(`${apiBase}/api/ifmea/interface-severity/bulk`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            rows: draft.map(row => ({
+              row_id: row.id, to_element: row.to_element,
+              effect_on_receiver: row.effect_on_receiver,
+            })),
+          }),
+        });
+        const data = await r.json();
+        const sevMap: Record<string, number> = {};
+        for (const res of data.results ?? []) sevMap[res.row_id] = res.severity_rank;
+        draft.forEach(row => {
+          const s = sevMap[row.id]; if (!s) return;
+          row.severity = s;
+          if (row.occurrence_answer && row.detection_answer) {
+            const { occurrence, detection, rpn, action_priority } =
+              computeRating(row.occurrence_answer, row.detection_answer, s);
+            row.occurrence = occurrence; row.detection = detection;
+            row.rpn = rpn; row.action_priority = action_priority;
+          }
+        });
+      } catch (e) { console.error("IFMEA severity failed:", e); }
+    }
+    setIfmeaRows(draft); setIfmeaRowsLoading(false);
+  };
+
+  const exportMatrixCsv = () => {
+    const esc = (v: unknown) => `"${String(v ?? "").replaceAll('"', '""')}"`;
+    const types: ConnType[] = ["P","E","I","M"];
+    // Header row: blank corner + element names (one column per element per type = 4 per element)
+    const headerCols = allElementNames.flatMap(el => types.map(t => `${el} (${t})`));
+    const rows = [["", ...headerCols].map(esc).join(",")];
+    for (const rowEl of allElementNames) {
+      const rowCells = allElementNames.flatMap(colEl => {
+        if (rowEl === colEl) return types.map(() => esc("//"));
+        const k = matrixKey(rowEl, colEl);
+        const cell = ifmeaMatrix[k] ?? emptyCell();
+        return types.map(t => esc(cell[t] === null ? "" : cell[t]));
+      });
+      rows.push([esc(rowEl), ...rowCells].join(","));
+    }
+    const csv = rows.join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
+    Object.assign(document.createElement("a"), { href: url, download: "interface_matrix.csv" }).click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportIfmeaCsv = () => {
+    const esc = (v: unknown) => `"${String(v ?? "").replaceAll('"', '""')}"`;
+    const headers = ["From Element","To Element","Conn Type","Nominal Transfer","Failure Mode",
+      "Failure Cause","Noise Factor","Effect on Receiver","Effect on Sender",
+      "S","O","D","RPN","AP","Prevention Methods","Detection Methods"];
+    const csv = [headers.map(esc).join(",")]
+      .concat(ifmeaRows.map(r => [
+        r.from_element, r.to_element, r.conn_type, r.nominal_transfer,
+        r.failure_mode, r.failure_cause, r.noise_factor,
+        r.effect_on_receiver, r.effect_on_sender,
+        r.severity ?? "", r.occurrence ?? "", r.detection ?? "", r.rpn ?? "", r.action_priority,
+        r.prevention_methods, r.detection_methods,
+      ].map(esc).join(",")))
+      .join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
+    Object.assign(document.createElement("a"), { href: url, download: "ifmea.csv" }).click();
+    URL.revokeObjectURL(url);
+  };
 
   // ── Failure mode helpers ─────────────────────────────────────────────────
 
@@ -1394,7 +1739,7 @@ function DFMEAWizard() {
 
     setRows(draft);
     setRowsLoading(false);
-    setStep(8);
+    setStep(9);
   };
 
   // ── Export CSV ───────────────────────────────────────────────────────────
@@ -1522,7 +1867,390 @@ function DFMEAWizard() {
           focusName={focusElement?.name ?? "Focus System"}
           lowerNames={lowerElements.map(e => e.name).filter(Boolean)}
           higherNames={higherElements.map(e => e.name).filter(Boolean)}
+          conns={bConns}
+          setConns={setBConns}
         />
+      )}
+    </Section>
+  );
+
+  // ── Step 2 ── IFMEA ─────────────────────────────────────────────────────────
+  const StepIFMEA = (
+    <Section title="IFMEA — Interface Failure Mode & Effects Analysis"
+      subtitle="Each connection drawn in the B-Diagram is one interface to analyse. Describe what it transfers, generate interface failure modes, then generate and rate causes.">
+
+      {bConns.length === 0 && (
+        <div className="rounded-lg bg-amber-50 border border-amber-200 p-4 text-sm text-amber-800">
+          No connections drawn yet. Go back to the B-Diagram step and draw at least one connection.
+        </div>
+      )}
+
+      {bConns.length > 0 && (
+        <>
+          {/* Phase tabs */}
+          <div className="flex rounded-lg border overflow-hidden w-fit">
+            {([["matrix","0. Interface Matrix"],["modes","1. Failure Modes"],["causes","2. Causes"],["rate","3. Rate & Build"]] as const).map(([ph, label]) => (
+              <button key={ph} type="button" onClick={() => setIfmeaPhase(ph)}
+                className={`px-4 py-1.5 text-xs font-semibold transition-colors ${ifmeaPhase === ph ? "bg-primary text-primary-foreground" : "bg-white text-gray-600 hover:bg-gray-50"}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {/* ── Phase 0: Interface Matrix ── */}
+          {ifmeaPhase === "matrix" && (
+            <div className="space-y-4">
+              <div className="text-xs text-muted-foreground space-y-1">
+                <p>Rate the interaction between every pair of elements using the four interface types.</p>
+                <p className="font-medium">Rating scale: <span className="text-green-700">+2</span> = necessary for function &nbsp; <span className="text-green-600">+1</span> = beneficial &nbsp; <span className="text-gray-500">0</span> = no effect &nbsp; <span className="text-orange-600">−1</span> = negative but not preventing &nbsp; <span className="text-red-600">−2</span> = must be prevented</p>
+                <p className="text-gray-400">Diagonal cells are greyed out (element cannot interface with itself). Leave blank if not applicable.</p>
+              </div>
+
+              {allElementNames.length < 2 ? (
+                <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-sm text-amber-800">
+                  Define at least two elements in Step 1 to build the matrix.
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white shadow-sm">
+                  <table className="border-collapse text-[11px] w-full">
+                    <thead>
+                      {/* Connection type legend row */}
+                      <tr>
+                        <th className="border border-gray-200 bg-gray-50 p-2 text-left min-w-[140px]">
+                          <div className="grid grid-cols-2 gap-0.5 text-[9px]">
+                            {(["P","E","I","M"] as ConnType[]).map(t => (
+                              <span key={t} className="flex items-center gap-0.5 font-bold" style={{ color: CONN_META[t].color }}>
+                                <span className="w-3 h-3 rounded-sm flex items-center justify-center text-white text-[8px]" style={{ background: CONN_META[t].color }}>{t}</span>
+                                {CONN_META[t].label}
+                              </span>
+                            ))}
+                          </div>
+                        </th>
+                        {allElementNames.map(col => (
+                          <th key={col} className="border border-gray-200 bg-gray-100 p-1.5 font-semibold text-gray-700 text-center min-w-[88px]">
+                            <div className="text-[10px] leading-tight">{col}</div>
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {allElementNames.map((rowEl, ri) => (
+                        <tr key={rowEl} className={ri % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
+                          <td className="border border-gray-200 bg-gray-100 p-1.5 font-semibold text-gray-700 min-w-[140px]">
+                            <div className="text-[10px] leading-tight">{rowEl}</div>
+                          </td>
+                          {allElementNames.map((colEl, ci) => {
+                            const isDiag = rowEl === colEl;
+                            const k = matrixKey(rowEl, colEl);
+                            const cell = ifmeaMatrix[k] ?? emptyCell();
+
+                            if (isDiag) {
+                              return (
+                                <td key={colEl} className="border border-gray-200 bg-gray-200/60 p-0" />
+                              );
+                            }
+
+                            return (
+                              <td key={colEl} className="border border-gray-200 p-1 align-top">
+                                {/* 2×2 mini-grid: P top-left, E top-right, I bottom-left, M bottom-right */}
+                                <div className="grid grid-cols-2 gap-0.5">
+                                  {(["P","E","I","M"] as ConnType[]).map(t => (
+                                    <div key={t} className="flex flex-col items-center gap-0.5">
+                                      <span className="text-[8px] font-bold leading-none" style={{ color: CONN_META[t].color }}>{t}</span>
+                                      <select
+                                        value={cell[t] === null ? "" : String(cell[t])}
+                                        onChange={e => setMatrixCell(rowEl, colEl, t, e.target.value === "" ? null : parseInt(e.target.value))}
+                                        className="w-9 h-6 text-[10px] text-center border rounded cursor-pointer focus:outline-none focus:ring-1 focus:ring-primary"
+                                        style={{
+                                          background: cell[t] === null ? "#f9f9f9"
+                                            : cell[t]! >= 2  ? "#dcfce7"
+                                            : cell[t]! === 1 ? "#f0fdf4"
+                                            : cell[t]! === 0 ? "#f9fafb"
+                                            : cell[t]! === -1 ? "#fff7ed"
+                                            : "#fef2f2",
+                                          color: cell[t] === null ? "#9ca3af"
+                                            : cell[t]! >= 2  ? "#15803d"
+                                            : cell[t]! === 1 ? "#166534"
+                                            : cell[t]! === 0 ? "#6b7280"
+                                            : cell[t]! === -1 ? "#c2410c"
+                                            : "#b91c1c",
+                                          fontWeight: cell[t] !== null && cell[t] !== 0 ? "700" : "400",
+                                        }}
+                                      >
+                                        <option value="">–</option>
+                                        <option value="2">+2</option>
+                                        <option value="1">+1</option>
+                                        <option value="0">0</option>
+                                        <option value="-1">−1</option>
+                                        <option value="-2">−2</option>
+                                      </select>
+                                    </div>
+                                  ))}
+                                </div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Critical interfaces summary: any cell with -2 */}
+              {(() => {
+                const critical: { from: string; to: string; types: ConnType[] }[] = [];
+                for (const [k, cell] of Object.entries(ifmeaMatrix)) {
+                  const [from, to] = k.split("::");
+                  const critTypes = (["P","E","I","M"] as ConnType[]).filter(t => cell[t] === -2);
+                  if (critTypes.length) critical.push({ from, to, types: critTypes });
+                }
+                if (!critical.length) return null;
+                return (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-3 space-y-2">
+                    <p className="text-xs font-semibold text-red-700 flex items-center gap-1.5">
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      Critical interfaces (−2: must be prevented) — these should be priority IFMEA subjects
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {critical.map(({ from, to, types }) => (
+                        <div key={`${from}::${to}`} className="flex items-center gap-1 px-2 py-1 bg-white rounded border border-red-200 text-xs">
+                          <span className="font-medium text-gray-700">{from}</span>
+                          <span className="text-gray-400">→</span>
+                          <span className="font-medium text-gray-700">{to}</span>
+                          <span className="text-red-600 font-bold ml-1">({types.join(", ")})</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div className="flex justify-between items-center pt-2">
+                <Button variant="outline" size="sm" onClick={() => setIfmeaMatrix({})}>
+                  Reset matrix
+                </Button>
+                <Button onClick={() => setIfmeaPhase("modes")}>
+                  Next: Failure Modes <ArrowRight className="h-4 w-4 ml-2" />
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* ── Phase 1: Describe + generate failure modes ── */}
+          {ifmeaPhase === "modes" && (
+            <div className="space-y-4">
+              <p className="text-xs text-muted-foreground">
+                For each interface, describe what is nominally transferred, then generate interface failure modes.
+              </p>
+              {ifmeaInterfaces.map(iface => {
+                const meta = CONN_META[iface.connType];
+                const selectedCount = iface.modes.filter(m => m.selected).length;
+                return (
+                  <Card key={iface.id} className="border">
+                    <CardContent className="p-4 space-y-3">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <span className="px-2 py-0.5 rounded text-xs font-bold text-white" style={{ background: meta.color }}>{iface.connType}</span>
+                        <span className="font-semibold text-sm">{iface.fromElement}</span>
+                        <ArrowRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                        <span className="font-semibold text-sm">{iface.toElement}</span>
+                        <span className="text-xs text-muted-foreground">({meta.label})</span>
+                        {selectedCount > 0 && <Badge variant="default" className="ml-auto">{selectedCount} modes selected</Badge>}
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs font-semibold">What is nominally transferred through this interface?</Label>
+                        <Input className="text-sm"
+                          placeholder={
+                            iface.connType === "P" ? "e.g. Axial load 0–50 kN via spline coupling"
+                            : iface.connType === "E" ? "e.g. Drive torque 0–2000 Nm at 0–3000 rpm"
+                            : iface.connType === "I" ? "e.g. CAN brake command, 10ms cycle, 0–4096 Nm range"
+                            : "e.g. Hydraulic fluid 0–200 bar, 2 L/min flow"
+                          }
+                          value={iface.nominalTransfer}
+                          onChange={e => updateIfmeaTransfer(iface.id, e.target.value)} />
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <Label className="text-xs font-semibold">Interface failure modes</Label>
+                          <Button size="sm" variant="secondary"
+                            disabled={iface.modesLoading || !iface.nominalTransfer.trim()}
+                            onClick={() => fetchIfmeaModes(iface)}>
+                            {iface.modesLoading ? <><Loader2 className="h-3 w-3 mr-1 animate-spin" />Generating…</> : "Generate modes"}
+                          </Button>
+                        </div>
+                        {!iface.modesGenerated && !iface.modesLoading && (
+                          <p className="text-xs text-muted-foreground italic">Fill in nominal transfer above, then click Generate modes.</p>
+                        )}
+                        {iface.modes.length > 0 && (
+                          <div className="space-y-1.5">
+                            {iface.modes.map(m => (
+                              <label key={m.id} className={`flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer text-sm transition-all ${m.selected ? "border-primary bg-primary/5" : "border-border hover:bg-muted/30"}`}>
+                                <Checkbox className="mt-0.5 shrink-0" checked={m.selected} onCheckedChange={() => toggleIfmeaMode(iface.id, m.id)} />
+                                <span className="leading-snug">{m.mode}</span>
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+              <div className="flex justify-end">
+                <Button onClick={() => setIfmeaPhase("causes")}>
+                  Next: Generate Causes <ArrowRight className="h-4 w-4 ml-2" />
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* ── Phase 2: Generate + select causes ── */}
+          {ifmeaPhase === "causes" && (
+            <div className="space-y-4">
+              {!ifmeaCausesGenerated ? (
+                <>
+                  <p className="text-sm text-muted-foreground">
+                    Causes are generated for each selected interface failure mode × noise factor combination.
+                    Causes must originate in the interface mechanism itself — not inside either connected element.
+                  </p>
+                  <Button onClick={generateIfmeaCauses} disabled={ifmeaCausesLoading}>
+                    {ifmeaCausesLoading
+                      ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating…</>
+                      : <><Zap className="h-4 w-4 mr-2" />Generate all interface causes</>}
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2 text-sm">
+                      <Badge variant="outline">{ifmeaTotalSelected} selected</Badge>
+                      <span className="text-muted-foreground">across {ifmeaCauseGroups.length} groups</span>
+                    </div>
+                    <Button size="sm" variant="outline" disabled={ifmeaCausesLoading} onClick={generateIfmeaCauses}>
+                      {ifmeaCausesLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Regenerate"}
+                    </Button>
+                  </div>
+                  {ifmeaCauseGroups.map((group, gi) => {
+                    const sel = group.causes.filter(c => c.selected).length;
+                    return (
+                      <Collapsible key={gi}
+                        title={`${group.fromElement} → ${group.toElement}  |  ${group.failureMode}`}
+                        badge={`${sel} / ${group.causes.length}`}
+                        badgeVariant={sel > 0 ? "default" : "secondary"}>
+                        {!group.causes.length
+                          ? <p className="text-sm text-muted-foreground">No causes generated.</p>
+                          : (
+                            <div className="space-y-2">
+                              {group.causes.map(cause => (
+                                <label key={cause.id} className={`flex items-start gap-3 rounded-lg border p-3 cursor-pointer transition-all ${cause.selected ? "border-primary bg-primary/5" : "border-border hover:bg-muted/30"}`}>
+                                  <Checkbox className="mt-0.5 shrink-0" checked={cause.selected} onCheckedChange={() => toggleIfmeaCause(gi, cause.id)} />
+                                  <div className="min-w-0">
+                                    <p className="text-sm font-medium leading-snug">{cause.cause}</p>
+                                    <p className="text-xs text-muted-foreground mt-0.5">{cause.noise_category} · {cause.noise_factor}</p>
+                                  </div>
+                                </label>
+                              ))}
+                            </div>
+                          )}
+                      </Collapsible>
+                    );
+                  })}
+                  {ifmeaTotalSelected > 0 && (
+                    <div className="flex justify-end pt-1">
+                      <Button onClick={() => setIfmeaPhase("rate")}>Next: Rate Causes <ArrowRight className="h-4 w-4 ml-2" /></Button>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ── Phase 3: Rate causes + build rows ── */}
+          {ifmeaPhase === "rate" && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/30 border">
+                <div className="flex-1 h-1.5 bg-border rounded-full overflow-hidden">
+                  <div className="h-full bg-primary rounded-full transition-all"
+                    style={{ width: ifmeaTotalSelected ? `${(ifmeaTotalRated / ifmeaTotalSelected) * 100}%` : "0%" }} />
+                </div>
+                <span className="text-sm font-medium shrink-0">{ifmeaTotalRated} / {ifmeaTotalSelected} rated</span>
+                {ifmeaTotalRated < ifmeaTotalSelected && (
+                  <span className="flex items-center gap-1 text-amber-600 text-xs shrink-0">
+                    <AlertTriangle className="h-3 w-3" />Incomplete
+                  </span>
+                )}
+              </div>
+              {ifmeaCauseGroups.map((group, gi) => {
+                const selected = group.causes.filter(c => c.selected);
+                if (!selected.length) return null;
+                const ratedCount = selected.filter(c => c.occurrence_answer && c.detection_answer).length;
+                return (
+                  <Collapsible key={gi} defaultOpen={gi === 0}
+                    title={`${group.fromElement} → ${group.toElement}  |  ${group.failureMode}`}
+                    badge={`${ratedCount} / ${selected.length}`}
+                    badgeVariant={ratedCount === selected.length ? "default" : "secondary"}>
+                    <div className="space-y-6">
+                      {selected.map(cause => {
+                        const rating = cause.occurrence_answer && cause.detection_answer
+                          ? computeRating(cause.occurrence_answer, cause.detection_answer, 5) : null;
+                        return (
+                          <div key={cause.id} className="border rounded-lg p-4 space-y-4">
+                            <div>
+                              <p className="font-medium text-sm">{cause.cause}</p>
+                              <p className="text-xs text-muted-foreground mt-0.5">{cause.noise_category} · {cause.noise_factor}</p>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              <div className="space-y-1.5">
+                                <Label className="text-sm font-semibold">Prevention Methods</Label>
+                                <Textarea rows={2} className="text-sm resize-none"
+                                  placeholder="e.g. IP67 connector, conformal coating, CRC validation…"
+                                  value={cause.prevention_methods}
+                                  onChange={e => updateIfmeaCauseField(gi, cause.id, "prevention_methods", e.target.value)} />
+                              </div>
+                              <div className="space-y-1.5">
+                                <Label className="text-sm font-semibold">Detection Methods</Label>
+                                <Textarea rows={2} className="text-sm resize-none"
+                                  placeholder="e.g. Signal plausibility check, continuity test, EMC test…"
+                                  value={cause.detection_methods}
+                                  onChange={e => updateIfmeaCauseField(gi, cause.id, "detection_methods", e.target.value)} />
+                              </div>
+                            </div>
+                            <div className="space-y-2">
+                              <Label className="text-sm font-semibold">How likely will this interface cause occur?</Label>
+                              <OptionPills options={OCCURRENCE_OPTIONS} value={cause.occurrence_answer}
+                                onChange={v => updateIfmeaCauseField(gi, cause.id, "occurrence_answer", v)} />
+                            </div>
+                            <div className="space-y-2">
+                              <Label className="text-sm font-semibold">How likely will this be detected before affecting the receiving element?</Label>
+                              <OptionPills options={DETECTION_OPTIONS} value={cause.detection_answer}
+                                onChange={v => updateIfmeaCauseField(gi, cause.id, "detection_answer", v)} />
+                            </div>
+                            {rating && (
+                              <div className="flex flex-wrap gap-2 pt-1 border-t items-center">
+                                <Badge variant="outline">O = {rating.occurrence}</Badge>
+                                <Badge variant="outline">D = {rating.detection}</Badge>
+                                <RpnBadge rpn={rating.rpn!} />
+                                <ApBadge ap={rating.action_priority} />
+                                <span className="text-xs text-muted-foreground ml-1">(S=5 default — update in Review)</span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </Collapsible>
+                );
+              })}
+              <div className="flex justify-end pt-2">
+                <Button onClick={buildIfmeaRows} disabled={ifmeaRowsLoading}>
+                  {ifmeaRowsLoading
+                    ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Building IFMEA rows…</>
+                    : <>Build IFMEA rows <ArrowRight className="h-4 w-4 ml-2" /></>}
+                </Button>
+              </div>
+            </div>
+          )}
+        </>
       )}
     </Section>
   );
@@ -1959,99 +2687,179 @@ function DFMEAWizard() {
     </Section>
   );
 
-  // ── Step 8 ── Review & Export ─────────────────────────────────────────────
+  // ── Step 9 ── Review & Export ─────────────────────────────────────────────
   const StepReview = (
     <Section title="Review & Export"
-      subtitle="Edit cells inline. Set Severity (S) — RPN auto-recalculates. Then export.">
-      {!rows.length ? (
-        <p className="text-sm text-muted-foreground">No rows yet. Complete the Risk Rating step first.</p>
-      ) : (
-        <>
-          <div className="flex items-center gap-3 flex-wrap mb-4">
-            <Badge variant="outline">{rows.length} rows</Badge>
-            <Badge variant={rows.filter(r => (r.rpn ?? 0) >= 200).length > 0 ? "destructive" : "outline"}>
-              {rows.filter(r => (r.rpn ?? 0) >= 200).length} high-risk (RPN ≥ 200)
-            </Badge>
-            <Badge variant="secondary">
-              {rows.filter(r => (r.rpn ?? 0) >= 100 && (r.rpn ?? 0) < 200).length} medium-risk
-            </Badge>
-            <Button size="sm" onClick={exportCsv}>
-              <CheckCircle2 className="h-4 w-4 mr-2" />Export CSV
-            </Button>
-            <Button size="sm" variant="outline" onClick={exportTemplateXlsx}>
-              <Download className="h-4 w-4 mr-2" />Export XLSX
-            </Button>
-          </div>
+      subtitle="Edit cells inline. Set Severity — RPN auto-recalculates. Export DFMEA and IFMEA separately.">
 
-          <div className="overflow-x-auto rounded-lg border">
-            <Table>
-              <TableHeader>
-                <TableRow className="bg-muted/40">
-                  <TableHead className="min-w-[150px]">Focus Function</TableHead>
-                  <TableHead className="min-w-[170px]">Failure Mode</TableHead>
-                  <TableHead className="min-w-[190px]">Failure Cause</TableHead>
-                  <TableHead className="min-w-[190px]">Failure Effect</TableHead>
-                  <TableHead className="min-w-[70px] text-center">S</TableHead>
-                  <TableHead className="min-w-[60px] text-center">O</TableHead>
-                  <TableHead className="min-w-[60px] text-center">D</TableHead>
-                  <TableHead className="min-w-[80px] text-center">RPN</TableHead>
-                  <TableHead className="min-w-[60px] text-center">AP</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {rows.map((r, i) => (
-                  <TableRow key={r.id}
-                    className={
-                      (r.rpn ?? 0) >= 200 ? "bg-red-50/50"
-                      : (r.rpn ?? 0) >= 100 ? "bg-amber-50/50" : ""
-                    }>
-                    <TableCell className="text-xs align-top py-2">{r.focus_function}</TableCell>
-                    <TableCell className="text-xs align-top py-2">{r.failure_mode}</TableCell>
-                    <TableCell className="py-2">
-                      <Input className="text-xs min-w-[170px]" value={r.failure_cause}
-                        onChange={e => setRows(p => p.map((row, idx) =>
-                          idx === i ? { ...row, failure_cause: e.target.value } : row))} />
-                    </TableCell>
-                    <TableCell className="py-2">
-                      <Input className="text-xs min-w-[170px]" value={r.failure_effect}
-                        onChange={e => setRows(p => p.map((row, idx) =>
-                          idx === i ? { ...row, failure_effect: e.target.value } : row))} />
-                    </TableCell>
-                    <TableCell className="text-center py-2">
-                      <Input type="number" min={1} max={10} className="w-14 text-xs text-center"
-                        placeholder="1–10" value={r.severity ?? ""}
-                        onChange={e => {
-                          const raw = e.target.value;
-                          const s   = raw === "" ? undefined : Math.max(1, Math.min(10, Number(raw)));
-                          setRows(p => p.map((row, idx) => {
-                            if (idx !== i) return row;
-                            if (!s || !row.occurrence_answer || !row.detection_answer) return { ...row, severity: s };
-                            const { occurrence, detection, rpn, action_priority } =
-                              computeRating(row.occurrence_answer, row.detection_answer, s);
-                            return { ...row, severity: s, occurrence, detection, rpn, action_priority };
-                          }));
-                        }} />
-                    </TableCell>
-                    <TableCell className="text-center py-2">
-                      <Badge variant="outline" className="text-xs">{r.occurrence ?? "–"}</Badge>
-                    </TableCell>
-                    <TableCell className="text-center py-2">
-                      <Badge variant="outline" className="text-xs">{r.detection ?? "–"}</Badge>
-                    </TableCell>
-                    <TableCell className="text-center py-2">
-                      {r.rpn != null ? <RpnBadge rpn={r.rpn} />
-                        : <span className="text-muted-foreground text-xs">–</span>}
-                    </TableCell>
-                    <TableCell className="text-center py-2">
-                      {r.action_priority ? <ApBadge ap={r.action_priority} />
-                        : <span className="text-muted-foreground text-xs">–</span>}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        </>
+      {/* Tab switcher */}
+      <div className="flex rounded-lg border overflow-hidden w-fit mb-4">
+        {([["dfmea","DFMEA"],["ifmea","IFMEA"]] as const).map(([tab, label]) => (
+          <button key={tab} type="button" onClick={() => setReviewTab(tab)}
+            className={`px-5 py-1.5 text-sm font-semibold transition-colors ${reviewTab === tab ? "bg-primary text-primary-foreground" : "bg-white text-gray-600 hover:bg-gray-50"}`}>
+            {label}
+            <Badge variant={reviewTab === tab ? "secondary" : "outline"} className="ml-2 text-xs">
+              {tab === "dfmea" ? rows.length : ifmeaRows.length}
+            </Badge>
+          </button>
+        ))}
+      </div>
+
+      {/* ── DFMEA tab ── */}
+      {reviewTab === "dfmea" && (
+        !rows.length
+          ? <p className="text-sm text-muted-foreground">No DFMEA rows yet. Complete the Risk Rating step first.</p>
+          : (
+            <>
+              <div className="flex items-center gap-3 flex-wrap mb-4">
+                <Badge variant="outline">{rows.length} rows</Badge>
+                <Badge variant={rows.filter(r => (r.rpn ?? 0) >= 200).length > 0 ? "destructive" : "outline"}>
+                  {rows.filter(r => (r.rpn ?? 0) >= 200).length} high-risk (RPN ≥ 200)
+                </Badge>
+                <Badge variant="secondary">
+                  {rows.filter(r => (r.rpn ?? 0) >= 100 && (r.rpn ?? 0) < 200).length} medium-risk
+                </Badge>
+                <Button size="sm" onClick={exportCsv}><CheckCircle2 className="h-4 w-4 mr-2" />Export DFMEA CSV</Button>
+                <Button size="sm" variant="outline" onClick={exportTemplateXlsx}><Download className="h-4 w-4 mr-2" />Export XLSX</Button>
+              </div>
+              <div className="overflow-x-auto rounded-lg border">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/40">
+                      <TableHead className="min-w-[150px]">Focus Function</TableHead>
+                      <TableHead className="min-w-[170px]">Failure Mode</TableHead>
+                      <TableHead className="min-w-[190px]">Failure Cause</TableHead>
+                      <TableHead className="min-w-[190px]">Failure Effect</TableHead>
+                      <TableHead className="min-w-[70px] text-center">S</TableHead>
+                      <TableHead className="min-w-[60px] text-center">O</TableHead>
+                      <TableHead className="min-w-[60px] text-center">D</TableHead>
+                      <TableHead className="min-w-[80px] text-center">RPN</TableHead>
+                      <TableHead className="min-w-[60px] text-center">AP</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {rows.map((r, i) => (
+                      <TableRow key={r.id} className={(r.rpn ?? 0) >= 200 ? "bg-red-50/50" : (r.rpn ?? 0) >= 100 ? "bg-amber-50/50" : ""}>
+                        <TableCell className="text-xs align-top py-2">{r.focus_function}</TableCell>
+                        <TableCell className="text-xs align-top py-2">{r.failure_mode}</TableCell>
+                        <TableCell className="py-2">
+                          <Input className="text-xs min-w-[170px]" value={r.failure_cause}
+                            onChange={e => setRows(p => p.map((row, idx) => idx === i ? { ...row, failure_cause: e.target.value } : row))} />
+                        </TableCell>
+                        <TableCell className="py-2">
+                          <Input className="text-xs min-w-[170px]" value={r.failure_effect}
+                            onChange={e => setRows(p => p.map((row, idx) => idx === i ? { ...row, failure_effect: e.target.value } : row))} />
+                        </TableCell>
+                        <TableCell className="text-center py-2">
+                          <Input type="number" min={1} max={10} className="w-14 text-xs text-center"
+                            placeholder="1–10" value={r.severity ?? ""}
+                            onChange={e => {
+                              const s = e.target.value === "" ? undefined : Math.max(1, Math.min(10, Number(e.target.value)));
+                              setRows(p => p.map((row, idx) => {
+                                if (idx !== i) return row;
+                                if (!s || !row.occurrence_answer || !row.detection_answer) return { ...row, severity: s };
+                                const { occurrence, detection, rpn, action_priority } = computeRating(row.occurrence_answer, row.detection_answer, s);
+                                return { ...row, severity: s, occurrence, detection, rpn, action_priority };
+                              }));
+                            }} />
+                        </TableCell>
+                        <TableCell className="text-center py-2"><Badge variant="outline" className="text-xs">{r.occurrence ?? "–"}</Badge></TableCell>
+                        <TableCell className="text-center py-2"><Badge variant="outline" className="text-xs">{r.detection ?? "–"}</Badge></TableCell>
+                        <TableCell className="text-center py-2">{r.rpn != null ? <RpnBadge rpn={r.rpn} /> : <span className="text-muted-foreground text-xs">–</span>}</TableCell>
+                        <TableCell className="text-center py-2">{r.action_priority ? <ApBadge ap={r.action_priority} /> : <span className="text-muted-foreground text-xs">–</span>}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
+          )
+      )}
+
+      {/* ── IFMEA tab ── */}
+      {reviewTab === "ifmea" && (
+        !ifmeaRows.length
+          ? <p className="text-sm text-muted-foreground">No IFMEA rows yet. Complete the IFMEA step (Step 3) first.</p>
+          : (
+            <>
+              <div className="flex items-center gap-3 flex-wrap mb-4">
+                <Badge variant="outline">{ifmeaRows.length} rows</Badge>
+                <Badge variant={ifmeaRows.filter(r => (r.rpn ?? 0) >= 200).length > 0 ? "destructive" : "outline"}>
+                  {ifmeaRows.filter(r => (r.rpn ?? 0) >= 200).length} high-risk (RPN ≥ 200)
+                </Badge>
+                <Button size="sm" onClick={exportIfmeaCsv}><CheckCircle2 className="h-4 w-4 mr-2" />Export IFMEA CSV</Button>
+                <Button size="sm" variant="outline" onClick={exportMatrixCsv}><Download className="h-4 w-4 mr-2" />Export Matrix CSV</Button>
+                <Button size="sm" variant="ghost" onClick={() => { setReviewTab("ifmea"); setStep(2); setIfmeaPhase("matrix"); }}>
+                  View Matrix
+                </Button>
+              </div>
+              <div className="overflow-x-auto rounded-lg border">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/40">
+                      <TableHead className="min-w-[120px]">Interface</TableHead>
+                      <TableHead className="min-w-[50px] text-center">Type</TableHead>
+                      <TableHead className="min-w-[160px]">Failure Mode</TableHead>
+                      <TableHead className="min-w-[180px]">Failure Cause</TableHead>
+                      <TableHead className="min-w-[180px]">Effect on Receiver</TableHead>
+                      <TableHead className="min-w-[150px]">Effect on Sender</TableHead>
+                      <TableHead className="min-w-[70px] text-center">S</TableHead>
+                      <TableHead className="min-w-[60px] text-center">O</TableHead>
+                      <TableHead className="min-w-[60px] text-center">D</TableHead>
+                      <TableHead className="min-w-[80px] text-center">RPN</TableHead>
+                      <TableHead className="min-w-[60px] text-center">AP</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {ifmeaRows.map((r, i) => {
+                      const meta = CONN_META[r.conn_type as ConnType] ?? CONN_META.P;
+                      return (
+                        <TableRow key={r.id} className={(r.rpn ?? 0) >= 200 ? "bg-red-50/50" : (r.rpn ?? 0) >= 100 ? "bg-amber-50/50" : ""}>
+                          <TableCell className="text-xs py-2">
+                            <div className="font-medium">{r.from_element}</div>
+                            <div className="text-muted-foreground">→ {r.to_element}</div>
+                          </TableCell>
+                          <TableCell className="text-center py-2">
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold text-white" style={{ background: meta.color }}>{r.conn_type}</span>
+                          </TableCell>
+                          <TableCell className="text-xs py-2">{r.failure_mode}</TableCell>
+                          <TableCell className="py-2">
+                            <Input className="text-xs min-w-[160px]" value={r.failure_cause}
+                              onChange={e => setIfmeaRows(p => p.map((row, idx) => idx === i ? { ...row, failure_cause: e.target.value } : row))} />
+                          </TableCell>
+                          <TableCell className="py-2">
+                            <Input className="text-xs min-w-[160px]" value={r.effect_on_receiver}
+                              onChange={e => setIfmeaRows(p => p.map((row, idx) => idx === i ? { ...row, effect_on_receiver: e.target.value } : row))} />
+                          </TableCell>
+                          <TableCell className="py-2">
+                            <Input className="text-xs min-w-[130px]" value={r.effect_on_sender}
+                              onChange={e => setIfmeaRows(p => p.map((row, idx) => idx === i ? { ...row, effect_on_sender: e.target.value } : row))} />
+                          </TableCell>
+                          <TableCell className="text-center py-2">
+                            <Input type="number" min={1} max={10} className="w-14 text-xs text-center"
+                              placeholder="1–10" value={r.severity ?? ""}
+                              onChange={e => {
+                                const s = e.target.value === "" ? undefined : Math.max(1, Math.min(10, Number(e.target.value)));
+                                setIfmeaRows(p => p.map((row, idx) => {
+                                  if (idx !== i) return row;
+                                  if (!s || !row.occurrence_answer || !row.detection_answer) return { ...row, severity: s };
+                                  const { occurrence, detection, rpn, action_priority } = computeRating(row.occurrence_answer, row.detection_answer, s);
+                                  return { ...row, severity: s, occurrence, detection, rpn, action_priority };
+                                }));
+                              }} />
+                          </TableCell>
+                          <TableCell className="text-center py-2"><Badge variant="outline" className="text-xs">{r.occurrence ?? "–"}</Badge></TableCell>
+                          <TableCell className="text-center py-2"><Badge variant="outline" className="text-xs">{r.detection ?? "–"}</Badge></TableCell>
+                          <TableCell className="text-center py-2">{r.rpn != null ? <RpnBadge rpn={r.rpn} /> : <span className="text-muted-foreground text-xs">–</span>}</TableCell>
+                          <TableCell className="text-center py-2">{r.action_priority ? <ApBadge ap={r.action_priority} /> : <span className="text-muted-foreground text-xs">–</span>}</TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
+          )
       )}
     </Section>
   );
@@ -2071,7 +2879,7 @@ function DFMEAWizard() {
             <ArrowLeft className="h-4 w-4 mr-1" />Back
           </Button>
           {/* Hide auto-Next on steps with their own forward button */}
-          {step < STEPS.length - 1 && step !== 5 && step !== 6 && step !== 7 && (
+          {step < STEPS.length - 1 && step !== 2 && step !== 6 && step !== 7 && step !== 8 && (
             <Button size="sm" onClick={next}>
               Next <ArrowRight className="h-4 w-4 ml-1" />
             </Button>
@@ -2110,13 +2918,14 @@ function DFMEAWizard() {
         >
           {step === 0 && StepElements}
           {step === 1 && StepBDiagram}
-          {step === 2 && StepFunctions}
-          {step === 3 && StepPDiagram}
-          {step === 4 && StepConnections}
-          {step === 5 && StepModes}
-          {step === 6 && StepCauses}
-          {step === 7 && StepRating}
-          {step === 8 && StepReview}
+          {step === 2 && StepIFMEA}
+          {step === 3 && StepFunctions}
+          {step === 4 && StepPDiagram}
+          {step === 5 && StepConnections}
+          {step === 6 && StepModes}
+          {step === 7 && StepCauses}
+          {step === 8 && StepRating}
+          {step === 9 && StepReview}
         </motion.div>
       </AnimatePresence>
     </div>

@@ -20,6 +20,47 @@ import {
 const apiBase = process.env.NEXT_PUBLIC_DFMEA_API ?? "http://localhost:8000";
 
 // ─────────────────────────────────────────────────────────────────────────────
+// INITIAL STATE TYPE  (passed from DFMEALauncher for Cases 2 & 3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type DFMEAMode = "new_design" | "new_use_case" | "design_change";
+
+type WizardInitialState = {
+  mode:            DFMEAMode;
+  focusElement?:   string;
+  lowerElements?:  string[];
+  higherElements?: string[];
+  focusFunctions?: string[];
+  lowerFunctions?: Record<string, string[]>;
+  higherFunctions?: Record<string, string[]>;
+  noiseFactors?: {
+    pieceTopiece?:        string[];
+    changeOverTime?:      string[];
+    customerUsage?:       string[];
+    externalEnvironment?: string[];
+    systemInteractions?:  string[];
+  };
+  oldNoiseFactors?: {
+    flat:        string[];
+    by_category: Record<string, string[]>;
+  };
+  failureModes?: Array<{
+    focus_fn:        string;
+    failure_mode:    string;
+    failure_effect:  string;
+    severity:        number | null;
+    lower_elements:  string[];
+    old_noise_factors?: string[];
+  }>;
+  sodReference?: Record<string, {
+    max_severity: number | null;
+    avg_occurrence: number | null;
+    avg_detection: number | null;
+    max_rpn: number | null;
+  }>;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // TYPES
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1098,15 +1139,25 @@ function PDiagramView({
 // MAIN COMPONENT
 // ─────────────────────────────────────────────────────────────────────────────
 
-function DFMEAWizard() {
+function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
+  const mode = initialState?.mode ?? "new_design";
   const [step, setStep] = useState(0);
 
-  // ── Step 0 ── Elements
-  const [lowerElements,  setLowerElements]  = useState<Element[]>([]);
-  const [focusElement,   setFocusElement]   = useState<Element | null>(null);
-  const [higherElements, setHigherElements] = useState<Element[]>([]);
+  // ── Step 0 ── Elements — seeded from initialState for Cases 2 & 3
+  const [lowerElements, setLowerElements] = useState<Element[]>(() =>
+    (initialState?.lowerElements ?? []).map(name => ({ id: uid("el"), name, level: "lower" as const }))
+  );
+  const [focusElement, setFocusElement] = useState<Element | null>(() =>
+    initialState?.focusElement
+      ? { id: uid("el"), name: initialState.focusElement, level: "focus" as const }
+      : null
+  );
+  const [higherElements, setHigherElements] = useState<Element[]>(() =>
+    (initialState?.higherElements ?? []).map(name => ({ id: uid("el"), name, level: "higher" as const }))
+  );
 
   // ── Step 1 ── B-Diagram — lifted so IFMEA step can read them
+  // Case 3: boxes exist (from elements above) but NO connections (empty bConns)
   const [bConns, setBConns] = useState<BConn[]>([]);
 
   // ── Step 2 ── IFMEA
@@ -1139,21 +1190,44 @@ function DFMEAWizard() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(bConns.map(c => c.id + c.type))]);
 
-  // ── Step 3 ── Functions
-  const [functions, setFunctions] = useState<Func[]>([]);
+  // ── Step 3 ── Functions — seeded from initialState for Cases 2 & 3
+  const [functions, setFunctions] = useState<Func[]>(() => {
+    if (!initialState) return [];
+    const out: Func[] = [];
+    // Focus functions
+    (initialState.focusFunctions ?? []).forEach(name => {
+      if (name) out.push({ id: uid("fn"), elementName: initialState.focusElement ?? "", name, level: "focus" });
+    });
+    // Lower functions — { elementName: [fn, fn] }
+    Object.entries(initialState.lowerFunctions ?? {}).forEach(([elName, fns]) => {
+      fns.forEach(name => { if (name) out.push({ id: uid("fn"), elementName: elName, name, level: "lower" }); });
+    });
+    // Higher functions
+    Object.entries(initialState.higherFunctions ?? {}).forEach(([elName, fns]) => {
+      fns.forEach(name => { if (name) out.push({ id: uid("fn"), elementName: elName, name, level: "higher" }); });
+    });
+    return out;
+  });
   const focusFunctions  = useMemo(() => functions.filter(f => f.level === "focus"),  [functions]);
   const lowerFunctions  = useMemo(() => functions.filter(f => f.level === "lower"),  [functions]);
   const higherFunctions = useMemo(() => functions.filter(f => f.level === "higher"), [functions]);
 
   // ── Step 3 ── P-Diagram (also drives noise for step 4+)
-  const [pDiagram, setPDiagram] = useState<PDiagramState>({
-    noiseCategories: {
-      pieceTopiece: [], changeOverTime: [], customerUsage: [],
-      externalEnvironment: [], systemInteractions: [],
-    },
-    inputs: [], outputs: [],
-    functions: [], functionalRequirements: [], controlFactors: [],
-    nonFunctionalRequirements: [], unintendedOutputs: [],
+  const [pDiagram, setPDiagram] = useState<PDiagramState>(() => {
+    // Case 3: pre-fill noise factors from imported DFMEA (environment unchanged)
+    const nf = initialState?.noiseFactors;
+    return {
+      noiseCategories: {
+        pieceTopiece:        nf?.pieceTopiece        ?? [],
+        changeOverTime:      nf?.changeOverTime       ?? [],
+        customerUsage:       nf?.customerUsage        ?? [],
+        externalEnvironment: nf?.externalEnvironment  ?? [],
+        systemInteractions:  nf?.systemInteractions   ?? [],
+      },
+      inputs: [], outputs: [],
+      functions: [], functionalRequirements: [], controlFactors: [],
+      nonFunctionalRequirements: [], unintendedOutputs: [],
+    };
   });
 
   // Sync focus functions → pDiagram.functions and auto-derive outputs
@@ -1798,6 +1872,28 @@ function DFMEAWizard() {
   // ── Step 0 ── Elements ────────────────────────────────────────────────────
   const StepElements = (
     <Section title="Elements" subtitle="Define lower-level, focus, and higher-level elements.">
+      {/* Case 2 / 3 import banner */}
+      {mode !== "new_design" && (
+        <div className={`rounded-xl border px-4 py-3 text-sm flex items-start gap-3 ${
+          mode === "new_use_case"
+            ? "bg-amber-50 border-amber-200 text-amber-800"
+            : "bg-green-50  border-green-200  text-green-800"
+        }`}>
+          <div className="mt-0.5 shrink-0 text-base">{mode === "new_use_case" ? "🔄" : "🔧"}</div>
+          <div>
+            <div className="font-semibold">
+              {mode === "new_use_case"
+                ? "New use case — elements imported from existing DFMEA"
+                : "Design change — elements imported from existing DFMEA"}
+            </div>
+            <div className="text-xs mt-0.5 opacity-80">
+              {mode === "new_use_case"
+                ? "Element names and functions are pre-filled. You will enter new noise factors in the P-Diagram step."
+                : "Element names and functions are pre-filled. Noise factors are retained. Re-draw B-Diagram connections and regenerate causes."}
+            </div>
+          </div>
+        </div>
+      )}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="space-y-2">
           <Label className="font-semibold">Lower-level elements</Label>
@@ -1858,6 +1954,16 @@ function DFMEAWizard() {
       title="B-Diagram (Boundary Diagram)"
       subtitle="Click any two boxes to draw a connection. Choose the type first: P = Physical, E = Energy, I = Information, M = Material. Hover a connection and click × to remove it. Download as SVG or PNG."
     >
+      {/* Case 3: explain boxes are imported, connections are empty */}
+      {mode === "design_change" && (
+        <div className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 flex items-start gap-3 text-sm text-green-800 mb-2">
+          <span className="mt-0.5 shrink-0">🔧</span>
+          <div>
+            <div className="font-semibold">Element boxes imported — connections are empty</div>
+            <div className="text-xs opacity-80 mt-0.5">Re-draw connections to reflect the new design. Switch to "Draw connections" mode and connect boxes.</div>
+          </div>
+        </div>
+      )}
       {!focusElement?.name && !lowerElements.length && !higherElements.length ? (
         <p className="text-sm text-muted-foreground">
           Go back to Step 1 and define your elements first.
@@ -2349,6 +2455,34 @@ function DFMEAWizard() {
       title="P-Diagram (Parameter Diagram)"
       subtitle="Fill in the P-diagram. Functions and Outputs are pre-populated from Step 3. Noise factors here will drive the Failure Causes step."
     >
+      {/* Case 2: show old noise factors user is replacing */}
+      {mode === "new_use_case" && (initialState?.oldNoiseFactors?.flat?.length ?? 0) > 0 && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-2 mb-2">
+          <div className="flex items-center gap-2">
+            <span className="text-base">🔄</span>
+            <div className="font-semibold text-sm text-amber-900">Old noise factors — replace with your new operating conditions</div>
+          </div>
+          <p className="text-xs text-amber-700">
+            These drove failure causes in the original DFMEA. Clear them below and add your new environment.
+            Causes will be re-generated only for new noise factors you enter.
+          </p>
+          <div className="flex flex-wrap gap-1.5 pt-1">
+            {(initialState?.oldNoiseFactors?.flat ?? []).map((nf, i) => (
+              <span key={i} className="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 border border-amber-300 text-amber-800 line-through opacity-60">{nf}</span>
+            ))}
+          </div>
+        </div>
+      )}
+      {/* Case 3: confirm noise retained */}
+      {mode === "design_change" && (
+        <div className="rounded-xl border border-green-200 bg-green-50 px-4 py-3 flex items-start gap-3 text-sm text-green-800 mb-2">
+          <span className="mt-0.5 shrink-0">🔧</span>
+          <div>
+            <div className="font-semibold">Noise factors retained from original DFMEA</div>
+            <div className="text-xs opacity-80 mt-0.5">The operating environment is unchanged. Edit if needed, then re-generate causes for modified components.</div>
+          </div>
+        </div>
+      )}
       <PDiagramView
         pDiagram={pDiagram}
         focusName={focusElement?.name ?? ""}
@@ -2446,6 +2580,64 @@ function DFMEAWizard() {
   // ── Step 5 ── Failure modes ───────────────────────────────────────────────
   const StepModes = (
     <Section title="Failure Modes" subtitle="Generate and select failure modes per focus function.">
+
+      {/* Case 2: old failure modes with noise context */}
+      {mode === "new_use_case" && (initialState?.failureModes?.length ?? 0) > 0 && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 space-y-3 mb-2">
+          <div className="flex items-center gap-2">
+            <span>🔄</span>
+            <div className="font-semibold text-sm text-amber-900">Old failure modes from imported DFMEA ({initialState!.failureModes!.length})</div>
+          </div>
+          <p className="text-xs text-amber-700">These existed for the old conditions. Generate fresh below — AI adapts to your new noise factors.</p>
+          <div className="space-y-1.5 max-h-48 overflow-y-auto">
+            {initialState!.failureModes!.map((m, i) => (
+              <div key={i} className="bg-white rounded-lg border border-amber-100 px-3 py-2 text-xs">
+                <div className="font-medium text-gray-700">{m.failure_mode}</div>
+                <div className="text-gray-400 mt-0.5 text-[10px]">{m.focus_fn}</div>
+                {(m.old_noise_factors?.length ?? 0) > 0 && (
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {m.old_noise_factors!.map((nf, j) => (
+                      <span key={j} className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-700 text-[9px] line-through opacity-60">{nf}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Case 3: reference panel with old modes + S/O/D */}
+      {mode === "design_change" && (initialState?.failureModes?.length ?? 0) > 0 && (
+        <div className="rounded-xl border border-green-200 bg-green-50 p-4 space-y-3 mb-2">
+          <div className="flex items-center gap-2">
+            <span>🔧</span>
+            <div className="font-semibold text-sm text-green-900">Reference: original failure modes ({initialState!.failureModes!.length})</div>
+          </div>
+          <p className="text-xs text-green-700">These existed in the old design. Generate modes for the new design and compare in Review.</p>
+          <div className="space-y-1.5 max-h-48 overflow-y-auto">
+            {initialState!.failureModes!.map((m, i) => {
+              const sod = initialState?.sodReference?.[m.lower_elements?.[0] ?? ""];
+              return (
+                <div key={i} className="bg-white rounded-lg border border-green-100 px-3 py-2 text-xs flex items-start justify-between gap-2">
+                  <div>
+                    <div className="font-medium text-gray-700">{m.failure_mode}</div>
+                    <div className="text-gray-400 text-[10px] mt-0.5">{m.failure_effect}</div>
+                  </div>
+                  {sod && (
+                    <div className="shrink-0 flex gap-1 text-[10px]">
+                      <span className="px-1.5 py-0.5 rounded bg-red-50 border border-red-100 text-red-600 font-medium">S={sod.max_severity}</span>
+                      <span className="px-1.5 py-0.5 rounded bg-orange-50 border border-orange-100 text-orange-600 font-medium">O≈{sod.avg_occurrence}</span>
+                      <span className="px-1.5 py-0.5 rounded bg-blue-50 border border-blue-100 text-blue-600 font-medium">D≈{sod.avg_detection}</span>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {!focusFunctions.length
         ? <p className="text-sm text-muted-foreground">Add focus functions first.</p>
         : (
@@ -2873,7 +3065,15 @@ function DFMEAWizard() {
 
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">DFMEA Builder</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold">DFMEA Builder</h1>
+          {mode === "new_use_case" && (
+            <span className="text-xs px-2.5 py-1 rounded-full bg-amber-100 border border-amber-300 text-amber-800 font-semibold">🔄 New Use Case</span>
+          )}
+          {mode === "design_change" && (
+            <span className="text-xs px-2.5 py-1 rounded-full bg-green-100 border border-green-300 text-green-800 font-semibold">🔧 Design Change</span>
+          )}
+        </div>
         <div className="flex gap-2">
           <Button variant="secondary" size="sm" disabled={step === 0} onClick={prev}>
             <ArrowLeft className="h-4 w-4 mr-1" />Back

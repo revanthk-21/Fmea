@@ -81,6 +81,7 @@ type CauseItem = {
   cause:              string;
   noise_category:     string;
   noise_factor:       string;
+  noise_driven:       boolean;  // always true for Case 1 — cause IS the noise factor manifesting
   selected:           boolean;
   prevention_methods: string;
   detection_methods:  string;
@@ -1680,6 +1681,7 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
               cause:              c.cause,
               noise_category:     c.noise_category,
               noise_factor:       c.noise_factor,
+              noise_driven:       true,   // Case 1: every generated cause is noise-driven by definition
               selected:           false,
               prevention_methods: "",
               detection_methods:  "",
@@ -2252,7 +2254,10 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
                                   <Checkbox className="mt-0.5 shrink-0" checked={cause.selected} onCheckedChange={() => toggleIfmeaCause(gi, cause.id)} />
                                   <div className="min-w-0">
                                     <p className="text-sm font-medium leading-snug">{cause.cause}</p>
-                                    <p className="text-xs text-muted-foreground mt-0.5">{cause.noise_category} · {cause.noise_factor}</p>
+                                    <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-blue-700 font-semibold">{cause.noise_factor}</span>
+                                      <span className="text-[10px] text-muted-foreground">{cause.noise_category}</span>
+                                    </div>
                                   </div>
                                 </label>
                               ))}
@@ -2303,7 +2308,10 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
                           <div key={cause.id} className="border rounded-lg p-4 space-y-4">
                             <div>
                               <p className="font-medium text-sm">{cause.cause}</p>
-                              <p className="text-xs text-muted-foreground mt-0.5">{cause.noise_category} · {cause.noise_factor}</p>
+                              <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-blue-700 font-semibold">{cause.noise_factor}</span>
+                                <span className="text-[10px] text-muted-foreground">{cause.noise_category}</span>
+                              </div>
                             </div>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                               <div className="space-y-1.5">
@@ -2749,11 +2757,14 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
                         >
                           <Checkbox className="mt-0.5 shrink-0" checked={cause.selected}
                             onCheckedChange={() => toggleCause(gi, cause.id)} />
-                          <div className="min-w-0">
+                          <div className="min-w-0 space-y-1">
                             <p className="text-sm font-medium leading-snug">{cause.cause}</p>
-                            <p className="text-xs text-muted-foreground mt-0.5">
-                              {cause.noise_category} · {cause.noise_factor}
-                            </p>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-blue-700 font-semibold">
+                                {cause.noise_factor}
+                              </span>
+                              <span className="text-[10px] text-muted-foreground">{cause.noise_category}</span>
+                            </div>
                           </div>
                         </label>
                       ))}
@@ -2818,7 +2829,8 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
                       <div>
                         <p className="font-medium text-sm">{cause.cause}</p>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          {cause.noise_category} · {cause.noise_factor}
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-blue-700 font-semibold">{cause.noise_factor}</span>
+                          <span className="text-[10px] text-muted-foreground ml-1">{cause.noise_category}</span>
                         </p>
                       </div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

@@ -1,0 +1,1011 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agentic AI Framework — Architecture</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Syne:wght@400;600;800&display=swap');
+
+  :root {
+    --bg: #0a0c10;
+    --surface: #111318;
+    --surface2: #181c24;
+    --border: #1e2330;
+    --accent: #00e5ff;
+    --accent2: #7c3aed;
+    --accent3: #10b981;
+    --accent4: #f59e0b;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --rag: #0ea5e9;
+    --dfmea: #8b5cf6;
+    --opt: #10b981;
+    --supervisor: #f59e0b;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Grid background */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(0,229,255,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,229,255,0.03) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .container {
+    position: relative;
+    z-index: 1;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 40px 24px;
+  }
+
+  header {
+    margin-bottom: 48px;
+  }
+
+  .tag {
+    display: inline-block;
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    padding: 3px 10px;
+    margin-bottom: 16px;
+  }
+
+  h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: clamp(28px, 4vw, 42px);
+    font-weight: 800;
+    line-height: 1.1;
+    color: #fff;
+    margin-bottom: 8px;
+  }
+
+  h1 span { color: var(--accent); }
+
+  .subtitle {
+    color: var(--muted);
+    font-size: 13px;
+    letter-spacing: 0.05em;
+  }
+
+  /* ─── Tabs ─── */
+  .tabs {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 32px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0;
+  }
+
+  .tab {
+    padding: 10px 20px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    background: none;
+    border: none;
+    color: var(--muted);
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: all 0.2s;
+  }
+
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  /* ─── Panel ─── */
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  /* ─── Architecture Diagram ─── */
+  .arch-diagram {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .layer {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    border-radius: 2px;
+    overflow: hidden;
+    transition: border-color 0.3s;
+  }
+
+  .layer:hover { border-color: var(--muted); }
+
+  .layer-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    background: var(--surface2);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+
+  .layer-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .layer-body {
+    padding: 16px;
+  }
+
+  .node-grid {
+    display: grid;
+    gap: 10px;
+  }
+
+  .node-grid-3 { grid-template-columns: repeat(3, 1fr); }
+  .node-grid-2 { grid-template-columns: repeat(2, 1fr); }
+  .node-grid-1 { grid-template-columns: 1fr; }
+
+  .node {
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 12px 14px;
+    background: var(--bg);
+    cursor: pointer;
+    transition: all 0.2s;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .node::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 3px;
+  }
+
+  .node:hover { transform: translateY(-1px); }
+
+  .node.rag::before { background: var(--rag); }
+  .node.dfmea::before { background: var(--dfmea); }
+  .node.opt::before { background: var(--opt); }
+  .node.supervisor::before { background: var(--supervisor); }
+  .node.infra::before { background: var(--muted); }
+
+  .node:hover.rag { border-color: var(--rag); box-shadow: 0 0 20px rgba(14,165,233,0.1); }
+  .node:hover.dfmea { border-color: var(--dfmea); box-shadow: 0 0 20px rgba(139,92,246,0.1); }
+  .node:hover.opt { border-color: var(--opt); box-shadow: 0 0 20px rgba(16,185,129,0.1); }
+  .node:hover.supervisor { border-color: var(--supervisor); box-shadow: 0 0 20px rgba(245,158,11,0.1); }
+
+  .node-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+  }
+
+  .node.rag .node-label { color: var(--rag); }
+  .node.dfmea .node-label { color: var(--dfmea); }
+  .node.opt .node-label { color: var(--opt); }
+  .node.supervisor .node-label { color: var(--supervisor); }
+  .node.infra .node-label { color: var(--muted); }
+
+  .node-desc {
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  /* Arrow connector */
+  .arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 0;
+    color: var(--muted);
+    font-size: 18px;
+    position: relative;
+  }
+
+  .arrow::before,
+  .arrow::after {
+    content: '';
+    height: 1px;
+    background: var(--border);
+    flex: 1;
+    max-width: 40%;
+  }
+
+  .arrow-label {
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0 12px;
+  }
+
+  /* ─── Detail Panel ─── */
+  #detail-panel {
+    position: fixed;
+    right: 0; top: 0; bottom: 0;
+    width: 360px;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    z-index: 100;
+    padding: 32px 24px;
+    overflow-y: auto;
+    transform: translateX(100%);
+    transition: transform 0.3s ease;
+  }
+
+  #detail-panel.open { transform: translateX(0); }
+
+  .detail-close {
+    position: absolute;
+    top: 16px; right: 16px;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-family: monospace;
+    font-size: 14px;
+    width: 28px; height: 28px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+  }
+
+  .detail-tag {
+    font-size: 9px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    padding: 2px 8px;
+    display: inline-block;
+    border: 1px solid currentColor;
+    border-radius: 1px;
+  }
+
+  .detail-title {
+    font-family: 'Syne', sans-serif;
+    font-size: 18px;
+    font-weight: 700;
+    margin-bottom: 16px;
+    color: #fff;
+  }
+
+  .detail-section {
+    margin-bottom: 20px;
+  }
+
+  .detail-section-label {
+    font-size: 9px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 4px;
+  }
+
+  .detail-text {
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.7;
+  }
+
+  .code-block {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    padding: 12px;
+    font-size: 11px;
+    color: var(--accent);
+    line-height: 1.6;
+    margin-top: 8px;
+    border-radius: 2px;
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  .pill {
+    display: inline-block;
+    font-size: 10px;
+    padding: 2px 8px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    margin: 2px;
+    color: var(--text);
+  }
+
+  /* ─── Flow panel ─── */
+  .flow-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .flow-step {
+    display: flex;
+    gap: 20px;
+    position: relative;
+    padding-bottom: 24px;
+  }
+
+  .flow-step::before {
+    content: '';
+    position: absolute;
+    left: 19px;
+    top: 40px;
+    bottom: 0;
+    width: 1px;
+    background: var(--border);
+  }
+
+  .flow-step:last-child::before { display: none; }
+
+  .flow-num {
+    width: 40px;
+    height: 40px;
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 700;
+    background: var(--surface);
+    z-index: 1;
+  }
+
+  .flow-content { flex: 1; }
+
+  .flow-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 6px;
+    margin-top: 8px;
+    font-family: 'Syne', sans-serif;
+  }
+
+  .flow-desc {
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+
+  .flow-step.rag .flow-num { color: var(--rag); border-color: var(--rag); }
+  .flow-step.dfmea .flow-num { color: var(--dfmea); border-color: var(--dfmea); }
+  .flow-step.opt .flow-num { color: var(--opt); border-color: var(--opt); }
+  .flow-step.sup .flow-num { color: var(--supervisor); border-color: var(--supervisor); }
+
+  /* Stack panel */
+  .stack-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+  }
+
+  .stack-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    padding: 16px;
+    border-radius: 2px;
+  }
+
+  .stack-card-title {
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 10px;
+  }
+
+  .stack-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .stack-item-dot {
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--muted);
+    margin-top: 5px;
+    flex-shrink: 0;
+  }
+
+  .stack-item-text {
+    font-size: 11px;
+    line-height: 1.5;
+  }
+
+  .stack-item-text strong {
+    color: var(--text);
+    display: block;
+    font-size: 11px;
+  }
+
+  .stack-item-text span {
+    color: var(--muted);
+    font-size: 10px;
+  }
+
+  @media (max-width: 768px) {
+    .node-grid-3 { grid-template-columns: 1fr; }
+    .node-grid-2 { grid-template-columns: 1fr; }
+    #detail-panel { width: 100%; }
+    .stack-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <header>
+    <div class="tag">System Architecture</div>
+    <h1>Agentic AI <span>Framework</span></h1>
+    <p class="subtitle">LangGraph · FastAPI · AWS Bedrock · React/Next.js — click any node for details</p>
+  </header>
+
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('arch')">Architecture</button>
+    <button class="tab" onclick="switchTab('flow')">Agent Flows</button>
+    <button class="tab" onclick="switchTab('stack')">Tech Stack</button>
+  </div>
+
+  <!-- ARCHITECTURE TAB -->
+  <div class="panel active" id="tab-arch">
+    <div class="arch-diagram">
+
+      <!-- Layer: Frontend -->
+      <div class="layer">
+        <div class="layer-header">
+          <div class="layer-dot" style="background:#64748b"></div>
+          <span style="color:#64748b">Presentation Layer</span>
+        </div>
+        <div class="layer-body">
+          <div class="node-grid node-grid-3">
+            <div class="node infra" onclick="showDetail('frontend')">
+              <div class="node-label">React / Next.js</div>
+              <div class="node-desc">Chat UI · DFMEA Wizard · Optimization Dashboard with live RMS plots</div>
+            </div>
+            <div class="node infra" onclick="showDetail('websocket')">
+              <div class="node-label">WebSocket / SSE</div>
+              <div class="node-desc">Streaming agent responses · Optimization iteration progress</div>
+            </div>
+            <div class="node infra" onclick="showDetail('auth')">
+              <div class="node-label">Auth + Session</div>
+              <div class="node-desc">JWT auth · Per-session LangGraph state persistence via checkpointer</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow"><span class="arrow-label">HTTP / WebSocket</span></div>
+
+      <!-- Layer: Gateway -->
+      <div class="layer">
+        <div class="layer-header">
+          <div class="layer-dot" style="background:#f59e0b"></div>
+          <span style="color:#f59e0b">API Gateway Layer</span>
+        </div>
+        <div class="layer-body">
+          <div class="node-grid node-grid-2">
+            <div class="node supervisor" onclick="showDetail('fastapi')">
+              <div class="node-label">FastAPI Gateway</div>
+              <div class="node-desc">Routes /rag · /dfmea · /optimize · Async task queuing via Celery + Redis</div>
+            </div>
+            <div class="node supervisor" onclick="showDetail('supervisor')">
+              <div class="node-label">LangGraph Supervisor</div>
+              <div class="node-desc">Master orchestrator node — reads task_type from state, dispatches to sub-graphs</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow"><span class="arrow-label">LangGraph State Machine</span></div>
+
+      <!-- Layer: Agents -->
+      <div class="layer">
+        <div class="layer-header">
+          <div class="layer-dot" style="background:#00e5ff"></div>
+          <span style="color:#00e5ff">Agent Layer</span>
+        </div>
+        <div class="layer-body">
+          <div class="node-grid node-grid-3">
+
+            <!-- RAG Agent -->
+            <div class="node rag" onclick="showDetail('rag')">
+              <div class="node-label">RAG Agent</div>
+              <div class="node-desc">
+                Query → Embed → Retrieve → Augment → Generate<br><br>
+                <span style="color:#0ea5e9">Titan Embeddings → FAISS → Claude Sonnet</span>
+              </div>
+            </div>
+
+            <!-- DFMEA Agent -->
+            <div class="node dfmea" onclick="showDetail('dfmea')">
+              <div class="node-label">DFMEA Agent</div>
+              <div class="node-desc">
+                Case Router → Wizard Steps → AIAG-VDA Templates → XLSX Export<br><br>
+                <span style="color:#8b5cf6">3 cases: New · NewEnv · DesignChange</span>
+              </div>
+            </div>
+
+            <!-- Optimization Agent -->
+            <div class="node opt" onclick="showDetail('opt')">
+              <div class="node-label">Optimization Agent</div>
+              <div class="node-desc">
+                Propose k → Solve ODE → Compute RMS → Converged? → Loop<br><br>
+                <span style="color:#10b981">scipy.solve_ivp · Optuna Bayesian search</span>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow"><span class="arrow-label">Tool Calls / Direct Invocation</span></div>
+
+      <!-- Layer: Tools & Services -->
+      <div class="layer">
+        <div class="layer-header">
+          <div class="layer-dot" style="background:#64748b"></div>
+          <span style="color:#64748b">Tools & Services Layer</span>
+        </div>
+        <div class="layer-body">
+          <div class="node-grid node-grid-3">
+            <div class="node rag" onclick="showDetail('vectorstore')">
+              <div class="node-label">Vector Store</div>
+              <div class="node-desc">FAISS (local) or Chroma · Titan Embeddings · Chunk size 512 · MMR retrieval</div>
+            </div>
+            <div class="node dfmea" onclick="showDetail('dfmea-tools')">
+              <div class="node-label">DFMEA Tools</div>
+              <div class="node-desc">xlsx parser · IFMEA router · B-Diagram builder · Risk rating calculator</div>
+            </div>
+            <div class="node opt" onclick="showDetail('ode-tools')">
+              <div class="node-label">ODE + Optimizer</div>
+              <div class="node-desc">Quarter-car model · solve_ivp (RK45) · Optuna sampler · RMS compute node</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow"><span class="arrow-label">Bedrock API</span></div>
+
+      <!-- Layer: AI Infrastructure -->
+      <div class="layer">
+        <div class="layer-header">
+          <div class="layer-dot" style="background:#64748b"></div>
+          <span style="color:#64748b">AI Infrastructure (AWS Bedrock)</span>
+        </div>
+        <div class="layer-body">
+          <div class="node-grid node-grid-3">
+            <div class="node infra" onclick="showDetail('bedrock-claude')">
+              <div class="node-label">Claude Sonnet</div>
+              <div class="node-desc">RAG generation · DFMEA reasoning · Optimization result summarization</div>
+            </div>
+            <div class="node infra" onclick="showDetail('bedrock-titan')">
+              <div class="node-label">Titan Embeddings</div>
+              <div class="node-desc">Document and query embedding for the RAG vector store</div>
+            </div>
+            <div class="node infra" onclick="showDetail('langsmith')">
+              <div class="node-label">LangSmith Tracing</div>
+              <div class="node-desc">Full agent trace · Node execution times · Token cost per run</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- FLOW TAB -->
+  <div class="panel" id="tab-flow">
+    <div class="flow-container">
+
+      <div class="flow-step sup">
+        <div class="flow-num">S</div>
+        <div class="flow-content">
+          <div class="flow-title">Supervisor Node — Entry Point</div>
+          <div class="flow-desc">User request hits FastAPI → packaged as AgentState TypedDict with task_type field. LangGraph supervisor reads task_type and routes via conditional edge to one of three sub-graphs. Checkpointer (Redis/SQLite) saves state for resume on failure.</div>
+        </div>
+      </div>
+
+      <div class="flow-step rag">
+        <div class="flow-num">R</div>
+        <div class="flow-content">
+          <div class="flow-title">RAG Agent Flow</div>
+          <div class="flow-desc">
+            <strong style="color:#0ea5e9; display:block; margin-bottom:4px">embed_query → retrieve_docs → grade_relevance → generate → return</strong>
+            Query is embedded via Titan. FAISS MMR retrieval fetches top-k diverse chunks. Optional relevance grading node filters low-quality chunks. Claude Sonnet generates answer with retrieved context. Supports multi-hop: if answer confidence low, reformulates query and retrieves again (cycle in LangGraph).
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-step dfmea">
+        <div class="flow-num">D</div>
+        <div class="flow-content">
+          <div class="flow-title">DFMEA Agent Flow</div>
+          <div class="flow-desc">
+            <strong style="color:#8b5cf6; display:block; margin-bottom:4px">route_case → [new | new_env | design_change] → wizard_steps → export</strong>
+            Case router reads dfmea_case from state. Each case triggers a different sub-graph path — your existing FastAPI routers are wrapped as LangGraph tool nodes. The wizard progresses through 10 steps (Elements→...→Review). LLM fills in failure modes, causes, and risk ratings at each step. Outputs structured XLSX via your existing exporter.
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-step opt">
+        <div class="flow-num">O</div>
+        <div class="flow-content">
+          <div class="flow-title">Optimization Agent Flow (Cyclic)</div>
+          <div class="flow-desc">
+            <strong style="color:#10b981; display:block; margin-bottom:4px">init_k → solve_ode → compute_rms → check_convergence → [loop | done]</strong>
+            Starts with initial spring stiffness k. ODE node integrates quarter-car equations via solve_ivp (RK45). RMS cabin acceleration computed from output. Optuna Bayesian optimizer proposes new k. LangGraph conditional edge: if |ΔRMS| &gt; ε and iterations &lt; max, loop back to solve_ode. On convergence, LLM summarizes optimal k and RMS with engineering interpretation. Full iteration history streamed to frontend.
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- STACK TAB -->
+  <div class="panel" id="tab-stack">
+    <div class="stack-grid">
+
+      <div class="stack-card">
+        <div class="stack-card-title">Orchestration</div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>LangGraph 0.2+</strong>
+            <span>Stateful graph execution, cycles, checkpointing, human-in-loop</span>
+          </div>
+        </div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>LangChain Core</strong>
+            <span>Prompt templates, output parsers, retriever abstractions</span>
+          </div>
+        </div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>Redis Checkpointer</strong>
+            <span>Persistent state across sessions, resume on failure</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="stack-card">
+        <div class="stack-card-title">Backend</div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>FastAPI + Uvicorn</strong>
+            <span>Async API, WebSocket streaming, existing routers reused</span>
+          </div>
+        </div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>Celery + Redis</strong>
+            <span>Background task queue for long-running optimization runs</span>
+          </div>
+        </div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>PostgreSQL</strong>
+            <span>Conversation history, DFMEA session data, optimization logs</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="stack-card">
+        <div class="stack-card-title">AI / ML</div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>AWS Bedrock — Claude Sonnet</strong>
+            <span>RAG generation, DFMEA reasoning, result summarization</span>
+          </div>
+        </div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>AWS Bedrock — Titan Embeddings</strong>
+            <span>Document and query embedding for RAG</span>
+          </div>
+        </div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>FAISS / ChromaDB</strong>
+            <span>Vector store for retrieval. FAISS for speed, Chroma for persistence</span>
+          </div>
+        </div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>Optuna + scipy</strong>
+            <span>Bayesian optimization + RK45 ODE solver for spring stiffness</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="stack-card">
+        <div class="stack-card-title">Frontend</div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>Next.js 14 + React</strong>
+            <span>App router, server components, streaming UI</span>
+          </div>
+        </div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>shadcn/ui + Tailwind</strong>
+            <span>Existing component library — reuse DFMEA wizard UI</span>
+          </div>
+        </div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>Recharts / Plotly</strong>
+            <span>Live RMS vs iteration plot during optimization runs</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="stack-card">
+        <div class="stack-card-title">Observability</div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>LangSmith</strong>
+            <span>Full LangGraph trace, node latencies, token costs</span>
+          </div>
+        </div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>Prometheus + Grafana</strong>
+            <span>API latency, optimization convergence metrics</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="stack-card">
+        <div class="stack-card-title">Deployment</div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>Docker + Docker Compose</strong>
+            <span>FastAPI + Celery + Redis + Postgres as services</span>
+          </div>
+        </div>
+        <div class="stack-item">
+          <div class="stack-item-dot"></div>
+          <div class="stack-item-text">
+            <strong>AWS ECS or EC2</strong>
+            <span>Keeps you within Bedrock VPC for low-latency LLM calls</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<!-- Detail Sidebar -->
+<div id="detail-panel">
+  <button class="detail-close" onclick="closeDetail()">✕</button>
+  <div id="detail-content"></div>
+</div>
+
+<script>
+const details = {
+  frontend: {
+    tag: 'Presentation', tagColor: '#64748b',
+    title: 'React / Next.js Frontend',
+    sections: [
+      { label: 'Purpose', text: 'Single unified UI for all three agents. The DFMEA wizard reuses your existing shadcn/ui components. A new chat panel handles RAG. A dedicated optimization dashboard shows live RMS convergence plots via WebSocket streaming.' },
+      { label: 'Key Components', text: 'ChatPanel.tsx · DFMEAWizard_updated.tsx (existing) · OptimizationDashboard.tsx · AgentSelector.tsx' },
+      { label: 'Streaming', text: 'Server-Sent Events (SSE) or WebSocket connection receives token-by-token streaming for RAG, step-by-step progress for DFMEA, and iteration-by-iteration RMS values for the optimizer.' }
+    ]
+  },
+  supervisor: {
+    tag: 'Orchestration', tagColor: '#f59e0b',
+    title: 'LangGraph Supervisor Node',
+    sections: [
+      { label: 'Role', text: 'The master entry point for all agent requests. Reads task_type from the shared AgentState TypedDict and uses a conditional edge to dispatch to the correct sub-graph.' },
+      { label: 'State Schema', code: `class AgentState(TypedDict):
+    task_type: Literal["rag","dfmea","opt"]
+    # RAG fields
+    query: str
+    retrieved_docs: list[str]
+    rag_answer: str
+    # DFMEA fields
+    dfmea_case: str
+    dfmea_output: dict
+    # Optimization fields
+    spring_k: float
+    rms_acc: float
+    iteration: int
+    converged: bool` },
+      { label: 'Checkpointing', text: 'Redis-backed LangGraph checkpointer saves state at every node. If the optimizer crashes at iteration 47, it can resume from there rather than restarting.' }
+    ]
+  },
+  rag: {
+    tag: 'Agent 1', tagColor: '#0ea5e9',
+    title: 'RAG Agent',
+    sections: [
+      { label: 'Node Sequence', code: `embed_query
+  → retrieve_docs (FAISS MMR, k=6)
+  → grade_relevance (optional filter)
+  → generate_answer (Claude Sonnet)
+  → [low confidence?] → rewrite_query → loop
+  → return` },
+      { label: 'Embedding', text: 'Documents chunked at 512 tokens with 64-token overlap. Titan Embeddings v2 generates 1536-dim vectors stored in FAISS. MMR retrieval maximizes relevance while minimizing redundancy among retrieved chunks.' },
+      { label: 'Multi-hop', text: 'If Claude\'s answer confidence score (from a grading prompt) is below threshold, the query is rewritten and retrieval is retried — implemented as a cycle in LangGraph.' }
+    ]
+  },
+  dfmea: {
+    tag: 'Agent 2', tagColor: '#8b5cf6',
+    title: 'DFMEA Generator Agent',
+    sections: [
+      { label: 'Case Routing', code: `if dfmea_case == "new":
+    → new_design_subgraph
+elif dfmea_case == "new_env":
+    → import_replace_noise_subgraph
+elif dfmea_case == "design_change":
+    → import_retain_noise_subgraph` },
+      { label: 'Integration with Existing Code', text: 'Your existing FastAPI routers (routers_ifmea.py, routers_import_parse.py, dfmea_universal_parser.py) are wrapped as LangGraph ToolNode callables. No rewrite needed — the agent calls them as tools.' },
+      { label: 'LLM Role', text: 'Claude Sonnet fills in failure modes, causes, effects, and risk ratings at each wizard step using AIAG-VDA 2019 methodology prompts. The structured output is parsed into your existing DFMEA schema.' }
+    ]
+  },
+  opt: {
+    tag: 'Agent 3', tagColor: '#10b981',
+    title: 'Spring Optimization Agent',
+    sections: [
+      { label: 'Node Sequence (Cyclic)', code: `initialize_k
+  → solve_ode (scipy RK45)
+  → compute_rms_acceleration
+  → optuna_propose_next_k
+  → check_convergence
+     ├─ not converged → solve_ode (loop)
+     └─ converged → llm_summarize → return` },
+      { label: 'ODE Model', text: 'Quarter-car 2-DOF model: sprung mass (cabin) + unsprung mass (axle). State vector: [x1, x1_dot, x2, x2_dot]. Input: road profile excitation. Output: cabin acceleration. RMS computed over full time window.' },
+      { label: 'Optimizer', text: 'Optuna TPE (Tree-structured Parzen Estimator) Bayesian sampler. Search space: k ∈ [k_min, k_max]. Objective: minimize RMS cabin acceleration. Typically converges in 30–80 iterations.' },
+      { label: 'Streaming', text: 'Each iteration\'s (k, RMS) pair is streamed via WebSocket to the frontend live chart as the optimization runs.' }
+    ]
+  },
+  fastapi: {
+    tag: 'Gateway', tagColor: '#f59e0b',
+    title: 'FastAPI Gateway',
+    sections: [
+      { label: 'Endpoints', code: `POST /api/rag          → RAG agent
+POST /api/dfmea        → DFMEA agent  
+POST /api/optimize     → Optimization agent
+GET  /api/optimize/{id}/stream → SSE stream
+GET  /api/health` },
+      { label: 'Task Queue', text: 'Long-running optimization jobs (potentially minutes) are dispatched to Celery workers via Redis broker. The frontend polls /stream for live updates. Short RAG/DFMEA calls are handled inline.' }
+    ]
+  },
+  ode_tools: {
+    tag: 'Tools', tagColor: '#10b981',
+    title: 'ODE Solver Tools',
+    sections: [
+      { label: 'Quarter-Car ODE', code: `def quarter_car(t, y, k, c, ms, mu, kt):
+    x1, v1, x2, v2 = y
+    # Sprung mass (cabin)
+    dx1 = v1
+    dv1 = (-k*(x1-x2) - c*(v1-v2)) / ms
+    # Unsprung mass  
+    dx2 = v2
+    dv2 = (k*(x1-x2) + c*(v1-v2)
+           - kt*(x2 - road(t))) / mu
+    return [dx1, dv1, dx2, dv2]` },
+      { label: 'RMS Computation', code: `sol = solve_ivp(quarter_car, t_span,
+                y0, args=(k,...), dense_output=True)
+a_cabin = np.diff(sol.y[1]) / dt
+rms = np.sqrt(np.mean(a_cabin**2))` }
+    ]
+  },
+  vectorstore: {
+    tag: 'Tools', tagColor: '#0ea5e9',
+    title: 'Vector Store',
+    sections: [
+      { label: 'Setup', text: 'Documents (PDFs, engineering specs, FMEA references) loaded via LangChain document loaders. Chunked with RecursiveCharacterTextSplitter (chunk=512, overlap=64). Embedded with Titan Embeddings V2.' },
+      { label: 'FAISS vs Chroma', text: 'Use FAISS for pure speed in a single-server setup. Use ChromaDB if you need persistent disk storage and filtering by metadata (document type, subsystem, etc.).' }
+    ]
+  },
+  'dfmea-tools': {
+    tag: 'Tools', tagColor: '#8b5cf6',
+    title: 'DFMEA Tools (Existing)',
+    sections: [
+      { label: 'Reuse Strategy', text: 'Your existing routers are wrapped as LangGraph tool nodes using @tool decorator. Zero rewrite of existing backend logic. The agent invokes them exactly as FastAPI would, but within the LangGraph execution graph.' },
+      { label: 'Tools Exposed', text: 'parse_xlsx_tool · generate_ifmea_tool · build_bdiagram_tool · compute_risk_ratings_tool · export_xlsx_tool' }
+    ]
+  },
+  'bedrock-claude': {
+    tag: 'Infrastructure', tagColor: '#64748b',
+    title: 'AWS Bedrock — Claude Sonnet',
+    sections: [
+      { label: 'Usage Per Agent', text: 'RAG: answer generation from retrieved context. DFMEA: structured failure mode/cause/effect generation with AIAG-VDA 2019 formatting. Optimization: natural language interpretation of optimal k value and engineering implications.' },
+      { label: 'Invocation', text: 'Via langchain-aws BedrockChat wrapper — plugs directly into LangGraph nodes without any custom HTTP calls.' }
+    ]
+  },
+  langsmith: {
+    tag: 'Observability', tagColor: '#64748b',
+    title: 'LangSmith Tracing',
+    sections: [
+      { label: 'What it captures', text: 'Full graph execution trace per request. Node-level latency breakdown. Exact prompts and completions for every LLM call. Token counts and cost per agent run. Retrieval quality metrics for RAG.' },
+      { label: 'Setup', code: `LANGCHAIN_TRACING_V2=true
+LANGCHAIN_API_KEY=ls__...
+LANGCHAIN_PROJECT=al-agentic-framework` }
+    ]
+  }
+};
+
+function showDetail(id) {
+  const d = details[id];
+  if (!d) return;
+  let html = `
+    <div class="detail-tag" style="color:${d.tagColor};border-color:${d.tagColor}">${d.tag}</div>
+    <div class="detail-title">${d.title}</div>
+  `;
+  for (const s of d.sections) {
+    html += `<div class="detail-section">
+      <div class="detail-section-label">${s.label}</div>`;
+    if (s.code) {
+      html += `<div class="code-block">${s.code}</div>`;
+    } else {
+      html += `<div class="detail-text">${s.text}</div>`;
+    }
+    html += `</div>`;
+  }
+  document.getElementById('detail-content').innerHTML = html;
+  document.getElementById('detail-panel').classList.add('open');
+}
+
+function closeDetail() {
+  document.getElementById('detail-panel').classList.remove('open');
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelector(`.tab[onclick*="${name}"]`).classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+}
+</script>
+</body>
+</html>

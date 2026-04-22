@@ -1,0 +1,353 @@
+"""
+routers/ifmea.py
+================
+Interface Failure Mode and Effects Analysis (IFMEA) — fully modular router.
+
+Endpoints
+---------
+POST /api/ifmea/interface-failure-modes
+    Generate failure modes for a single interface (connection between two elements).
+    Returns the 5 standard interface failure classes filtered to realistic ones.
+
+POST /api/ifmea/interface-causes/bulk
+    For each selected interface failure mode × noise factor, generate causes
+    that originate IN THE INTERFACE MECHANISM (not in either connected element).
+
+POST /api/ifmea/interface-effects/bulk
+    Generate effects on BOTH the sending and receiving element for each confirmed row.
+
+POST /api/ifmea/severity-interface/bulk
+    Rate severity for each interface failure based on the effect on the downstream
+    element's function.
+
+Key difference from DFMEA prompts
+----------------------------------
+DFMEA: "what causes the focus element to fail internally?"
+IFMEA: "what causes the CONNECTION BETWEEN elements to fail to transfer correctly?"
+
+The failure causes must live IN THE INTERFACE (connector, coupling, protocol, fluid
+path) — not inside either element. This is enforced explicitly in all prompts.
+"""
+
+import json, re
+from fastapi import APIRouter
+from pydantic import BaseModel
+from llm_client import llm
+
+router = APIRouter()
+
+# ─── helpers ──────────────────────────────────────────────────────────────────
+
+def _strip_json(text: str) -> str:
+    text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+    text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+def _parse_bullet(text: str) -> str:
+    return text.strip("–•- \n").strip()
+
+def _parse_bullets(text: str) -> list[str]:
+    lines = [_parse_bullet(l) for l in text.split("\n")]
+    return [l for l in lines if len(l) > 5 and l.upper() != "NONE"]
+
+# ─── Interface failure mode classes (the 5 standard classes) ──────────────────
+
+INTERFACE_FM_CLASSES = """
+Five standard interface failure classes (apply ALL that are realistic):
+  1. No transfer      — interface delivers nothing (open circuit, blocked path, lost signal)
+  2. Degraded transfer — interface delivers less than specified (>10% loss, partial blockage,
+                         attenuation, resistance increase, leakage)
+  3. Wrong transfer    — interface delivers incorrect content (corrupted signal, wrong value,
+                         reversed polarity, contaminated fluid)
+  4. Unintended transfer — interface delivers when it should not (short circuit, stuck-open valve,
+                           unintended current path, backflow)
+  5. Intermittent transfer — interface delivers inconsistently (fretting, loose connector,
+                              protocol timeout, intermittent contact)
+"""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 1. INTERFACE FAILURE MODES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class InterfaceFMRequest(BaseModel):
+    from_element:      str
+    to_element:        str
+    connection_type:   str   # P | E | I | M
+    nominal_transfer:  str   # what is nominally transferred (user-supplied description)
+    focus_element:     str   # context
+
+def generate_interface_failure_modes(req: "InterfaceFMRequest") -> list[str]:
+    conn_descriptions = {
+        "P": "Physical connection (mechanical joint, fastener, bearing, spline, weld, clearance fit)",
+        "E": "Energy transfer (torque coupling, electrical conductor, hydraulic line, thermal path)",
+        "I": "Information transfer (CAN/LIN bus, sensor signal, RF link, digital protocol)",
+        "M": "Material transfer (fluid line, coolant circuit, exhaust path, lubrication)",
+    }
+    conn_desc = conn_descriptions.get(req.connection_type, req.connection_type)
+
+    prompt = f"""TASK: Generate interface failure modes.
+
+System context: {req.focus_element}
+Interface FROM: {req.from_element}
+Interface TO:   {req.to_element}
+Connection type: {conn_desc}
+What is nominally transferred: {req.nominal_transfer}
+
+{INTERFACE_FM_CLASSES}
+
+RULES:
+- Each failure mode must describe how the TRANSFER fails — not how either element fails internally
+- Be specific to what is actually transferred ({req.nominal_transfer})
+- Only include classes that are physically/electrically realistic for this interface type
+- Do NOT include causes or effects
+- Each failure mode is ONE sentence in the form "Transfer of [X] [failure class description]"
+
+OUTPUT RULES:
+- Bullet points only
+- If a failure class is not realistic for this interface, skip it
+- If no realistic failure mode exists at all, output: NONE
+OUTPUT FORMAT:
+- <interface failure mode sentence>
+"""
+    raw = llm.generate(prompt, max_tokens=600)
+    return _parse_bullets(raw)
+
+class InterfaceFMBulkRequest(BaseModel):
+    interfaces: list[InterfaceFMRequest]
+
+@router.post("/interface-failure-modes")
+def interface_failure_modes(req: InterfaceFMRequest):
+    modes = generate_interface_failure_modes(req)
+    return {"failure_modes": modes}
+
+@router.post("/interface-failure-modes/bulk")
+def interface_failure_modes_bulk(req: InterfaceFMBulkRequest):
+    results = []
+    for iface in req.interfaces:
+        modes = generate_interface_failure_modes(iface)
+        results.append({
+            "from_element":   iface.from_element,
+            "to_element":     iface.to_element,
+            "connection_type": iface.connection_type,
+            "failure_modes":  modes,
+        })
+    return {"results": results}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2. INTERFACE FAILURE CAUSES (bulk)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class InterfaceCauseRequest(BaseModel):
+    from_element:     str
+    to_element:       str
+    connection_type:  str
+    nominal_transfer: str
+    failure_mode:     str
+    noise_factors:    dict[str, list[str]]   # {category: [factors]}
+
+class InterfaceCauseItem(BaseModel):
+    cause:           str
+    noise_category:  str
+    noise_factor:    str
+
+def generate_interface_causes(req: InterfaceCauseRequest) -> list[InterfaceCauseItem]:
+    causes = []
+    for category, factors in req.noise_factors.items():
+        for factor in factors:
+            if not factor.strip():
+                continue
+            prompt = f"""TASK: Generate Interface Failure Cause
+
+Interface FROM: {req.from_element}
+Interface TO:   {req.to_element}
+Connection type: {req.connection_type}
+Nominal transfer: {req.nominal_transfer}
+Interface failure mode: "{req.failure_mode}"
+Noise factor: {category}: {factor}
+
+DEFINITION:
+An interface failure cause is a physical, chemical, electrical, or protocol-level
+degradation mechanism that occurs WITHIN THE INTERFACE MECHANISM ITSELF —
+not inside either connected element.
+
+Examples of valid interface causes:
+  - For P (Physical): fretting corrosion at spline contact, fastener self-loosening due to vibration
+  - For E (Energy): increased contact resistance at connector terminal, fluid viscosity increase in line
+  - For I (Information): EMI-induced bit errors on CAN bus, impedance mismatch causing signal reflection
+  - For M (Material): seal degradation allowing fluid mixing, filter blockage reducing flow rate
+
+RULES:
+- Cause must originate IN THE INTERFACE (connector, coupling, joint, cable, pipe, protocol layer)
+- The cause MUST be triggered by or plausibly linked to the given noise factor
+- Do NOT describe failures inside {req.from_element} or {req.to_element} themselves
+- Be specific and measurable
+
+OUTPUT RULES:
+- If NO realistic interface cause exists for this noise factor, output exactly: NONE
+- Otherwise output exactly 1 bullet point with one cause sentence
+OUTPUT FORMAT:
+- <interface failure cause sentence>
+"""
+            raw = llm.generate(prompt, max_tokens=250).strip()
+            if raw and raw.upper() != "NONE":
+                line = next((l for l in raw.split("\n") if l.strip()), raw)
+                causes.append(InterfaceCauseItem(
+                    cause=_parse_bullet(line),
+                    noise_category=category,
+                    noise_factor=factor,
+                ))
+    return causes
+
+class InterfaceCauseBulkRequest(BaseModel):
+    from_element:     str
+    to_element:       str
+    connection_type:  str
+    nominal_transfer: str
+    failure_modes:    list[str]
+    noise_factors:    dict[str, list[str]]
+
+@router.post("/interface-causes/bulk")
+def interface_causes_bulk(req: InterfaceCauseBulkRequest):
+    results = []
+    for mode in req.failure_modes:
+        causes = generate_interface_causes(InterfaceCauseRequest(
+            from_element=req.from_element,
+            to_element=req.to_element,
+            connection_type=req.connection_type,
+            nominal_transfer=req.nominal_transfer,
+            failure_mode=mode,
+            noise_factors=req.noise_factors,
+        ))
+        results.append({
+            "failure_mode": mode,
+            "causes": [c.dict() for c in causes],
+        })
+    return {"groups": results}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3. INTERFACE FAILURE EFFECTS (bulk) — effects on BOTH connected elements
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class InterfaceEffectRow(BaseModel):
+    row_id:           str
+    from_element:     str
+    to_element:       str
+    connection_type:  str
+    nominal_transfer: str
+    failure_mode:     str
+
+class InterfaceEffectsBulkRequest(BaseModel):
+    rows: list[InterfaceEffectRow]
+
+def generate_interface_effects(row: InterfaceEffectRow) -> dict:
+    prompt = f"""TASK: Generate Interface Failure Effects
+
+Interface FROM: {row.from_element}
+Interface TO:   {row.to_element}
+Connection type: {row.connection_type}
+Nominal transfer: {row.nominal_transfer}
+Interface failure mode: "{row.failure_mode}"
+
+Generate TWO effects — one for each direction:
+
+1. EFFECT ON RECEIVING ELEMENT ({row.to_element}):
+   What function of {row.to_element} is lost or degraded because it no longer
+   receives the correct transfer?
+
+2. EFFECT ON SENDING ELEMENT ({row.from_element}):
+   What happens to {row.from_element} due to the changed load, back-pressure,
+   electrical reflection, or loss of feedback caused by this interface failure?
+
+RULES:
+- Each effect is ONE sentence
+- Describe functional impact, not just "it fails"
+- Effect 2 may be "No significant effect on sending element" if truly none
+
+OUTPUT: Valid JSON only, no markdown fences.
+{{
+  "effect_on_receiver": "<one sentence>",
+  "effect_on_sender":   "<one sentence>"
+}}
+"""
+    raw = llm.generate(prompt, max_tokens=300)
+    try:
+        return json.loads(_strip_json(raw))
+    except Exception:
+        return {
+            "effect_on_receiver": raw[:200].strip(),
+            "effect_on_sender":   "Could not parse",
+        }
+
+@router.post("/interface-effects/bulk")
+def interface_effects_bulk(req: InterfaceEffectsBulkRequest):
+    results = []
+    for row in req.rows:
+        effects = generate_interface_effects(row)
+        results.append({
+            "row_id":            row.row_id,
+            "effect_on_receiver": effects.get("effect_on_receiver", ""),
+            "effect_on_sender":   effects.get("effect_on_sender",   ""),
+        })
+    return {"results": results}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 4. INTERFACE SEVERITY RATING (bulk) — same rubric as DFMEA
+# ═══════════════════════════════════════════════════════════════════════════════
+
+SEVERITY_RUBRIC = """
+Severity Rubric (AIAG-VDA aligned):
+S=10  Hazardous without warning. Safety risk to occupants or public. Regulatory non-compliance.
+S=9   Hazardous with warning. Safety risk.
+S=8   Very High. Primary vehicle/system function completely lost. Vehicle inoperable.
+S=7   High. Primary function degraded but still partially operational.
+S=6   Moderate. Secondary function completely lost.
+S=5   Moderate. Secondary function degraded.
+S=4   Low. Noticeable NVH, appearance, or performance deterioration (>75% customers notice).
+S=3   Very Low. Minor effect, ~50% customers notice.
+S=2   Minor. <25% customers notice.
+S=1   None. No discernible effect.
+""".strip()
+
+class InterfaceSeverityRow(BaseModel):
+    row_id:              str
+    to_element:          str
+    effect_on_receiver:  str
+
+class InterfaceSeverityBulkRequest(BaseModel):
+    rows: list[InterfaceSeverityRow]
+
+@router.post("/interface-severity/bulk")
+def interface_severity_bulk(req: InterfaceSeverityBulkRequest):
+    results = []
+    for row in req.rows:
+        if not row.effect_on_receiver.strip():
+            results.append({"row_id": row.row_id, "severity_rank": 5,
+                            "reason": "No effect provided"})
+            continue
+        prompt = f"""TASK: Rate severity of an interface failure effect.
+
+Receiving element affected: {row.to_element}
+Effect on receiving element: "{row.effect_on_receiver}"
+
+{SEVERITY_RUBRIC}
+
+Output ONLY valid JSON, no markdown.
+{{"severity_rank": <1-10>, "reason": "<one sentence>"}}
+"""
+        raw = llm.generate(prompt, max_tokens=200)
+        try:
+            parsed = json.loads(_strip_json(raw))
+            rank = max(1, min(10, int(parsed.get("severity_rank", 5))))
+            results.append({
+                "row_id":        row.row_id,
+                "severity_rank": rank,
+                "reason":        parsed.get("reason", ""),
+            })
+        except Exception:
+            m = re.search(r'"severity_rank"\s*:\s*(\d+)', raw)
+            results.append({
+                "row_id":        row.row_id,
+                "severity_rank": int(m.group(1)) if m else 5,
+                "reason":        raw[:150],
+            })
+    return {"results": results}

@@ -135,6 +135,8 @@ type IFMEAInterface = {
   toElement:       string;
   connType:        ConnType;
   nominalTransfer: string;   // user-typed: what is transferred
+  focusFns:        string[]; // selected focus function names (multi-select)
+  focusFnIds:      string[]; // selected focus function ids
   modes:           IFMEAModeRec[];
   modesLoading:    boolean;
   modesGenerated:  boolean;
@@ -169,6 +171,7 @@ type IFMEACauseGroup = {
   connType:        ConnType;
   nominalTransfer: string;
   failureMode:     string;
+  focusFns:        string[]; // focus functions this group covers
   causes:          IFMEACauseItem[];
 };
 
@@ -181,8 +184,7 @@ type IFMEARow = {
   failure_mode:       string;
   failure_cause:      string;
   noise_factor:       string;
-  effect_on_receiver: string;
-  effect_on_sender:   string;
+  failure_effect:     string;  // effect on higher-level function
   severity:           number | undefined;
   prevention_methods: string;
   detection_methods:  string;
@@ -1185,6 +1187,7 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
       return bConns.map(conn => existing[conn.id] ?? {
         id: conn.id, fromElement: nameOf(conn.fromKey), toElement: nameOf(conn.toKey),
         connType: conn.type, nominalTransfer: "",
+        focusFns: [], focusFnIds: [],
         modes: [], modesLoading: false, modesGenerated: false,
       });
     });
@@ -1395,6 +1398,21 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
   const updateIfmeaTransfer = (id: string, val: string) =>
     setIfmeaInterfaces(p => p.map(i => i.id === id ? { ...i, nominalTransfer: val } : i));
 
+  // Toggle a focus function in/out of an interface's selection (multi-select)
+  const toggleIfmeaFocusFn = (ifaceId: string, ffId: string) => {
+    const ff = focusFunctions.find(f => f.id === ffId);
+    if (!ff) return;
+    setIfmeaInterfaces(p => p.map(i => {
+      if (i.id !== ifaceId) return i;
+      const already = i.focusFnIds.includes(ffId);
+      return {
+        ...i,
+        focusFnIds: already ? i.focusFnIds.filter(id => id !== ffId) : [...i.focusFnIds, ffId],
+        focusFns:   already ? i.focusFns.filter(n => n !== ff.name)  : [...i.focusFns,   ff.name],
+      };
+    }));
+  };
+
   const fetchIfmeaModes = async (iface: IFMEAInterface) => {
     setIfmeaInterfaces(p => p.map(i => i.id === iface.id ? { ...i, modesLoading: true } : i));
     try {
@@ -1446,6 +1464,7 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
             interfaceId: iface.id, fromElement: iface.fromElement,
             toElement: iface.toElement, connType: iface.connType,
             nominalTransfer: iface.nominalTransfer, failureMode: g.failure_mode,
+            focusFns: iface.focusFns,
             causes: (g.causes ?? []).map((c: { cause: string; noise_category: string; noise_factor: string }) => ({
               id: uid("ic"), cause: c.cause, noise_category: c.noise_category,
               noise_factor: c.noise_factor, selected: false,
@@ -1492,7 +1511,7 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
           conn_type: group.connType, nominal_transfer: group.nominalTransfer,
           failure_mode: group.failureMode, failure_cause: cause.cause,
           noise_factor: `${cause.noise_category}: ${cause.noise_factor}`,
-          effect_on_receiver: "", effect_on_sender: "",
+          failure_effect:     "",
           severity: undefined, prevention_methods: cause.prevention_methods,
           detection_methods: cause.detection_methods,
           occurrence: rated.occurrence, detection: rated.detection,
@@ -1514,12 +1533,11 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
           }),
         });
         const data = await r.json();
-        const effMap: Record<string, { effect_on_receiver: string; effect_on_sender: string }> = {};
+        const effMap: Record<string, { failure_effect: string }> = {};
         for (const res of data.results ?? []) effMap[res.row_id] = res;
         draft.forEach(row => {
           if (effMap[row.id]) {
-            row.effect_on_receiver = effMap[row.id].effect_on_receiver;
-            row.effect_on_sender   = effMap[row.id].effect_on_sender;
+            row.failure_effect = effMap[row.id].failure_effect;
           }
         });
       } catch (e) { console.error("IFMEA effects failed:", e); }
@@ -1531,7 +1549,7 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
           body: JSON.stringify({
             rows: draft.map(row => ({
               row_id: row.id, to_element: row.to_element,
-              effect_on_receiver: row.effect_on_receiver,
+              failure_effect: row.failure_effect,
             })),
           }),
         });
@@ -1577,13 +1595,13 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
   const exportIfmeaCsv = () => {
     const esc = (v: unknown) => `"${String(v ?? "").replaceAll('"', '""')}"`;
     const headers = ["From Element","To Element","Conn Type","Nominal Transfer","Failure Mode",
-      "Failure Cause","Noise Factor","Effect on Receiver","Effect on Sender",
+      "Failure Cause","Noise Factor","Failure Effect on Higher Function",
       "S","O","D","RPN","AP","Prevention Methods","Detection Methods"];
     const csv = [headers.map(esc).join(",")]
       .concat(ifmeaRows.map(r => [
         r.from_element, r.to_element, r.conn_type, r.nominal_transfer,
         r.failure_mode, r.failure_cause, r.noise_factor,
-        r.effect_on_receiver, r.effect_on_sender,
+        r.failure_effect,
         r.severity ?? "", r.occurrence ?? "", r.detection ?? "", r.rpn ?? "", r.action_priority,
         r.prevention_methods, r.detection_methods,
       ].map(esc).join(",")))
@@ -3005,8 +3023,7 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
                       <TableHead className="min-w-[50px] text-center">Type</TableHead>
                       <TableHead className="min-w-[160px]">Failure Mode</TableHead>
                       <TableHead className="min-w-[180px]">Failure Cause</TableHead>
-                      <TableHead className="min-w-[180px]">Effect on Receiver</TableHead>
-                      <TableHead className="min-w-[150px]">Effect on Sender</TableHead>
+                      <TableHead className="min-w-[220px]">Failure Effect on Higher Function</TableHead>
                       <TableHead className="min-w-[70px] text-center">S</TableHead>
                       <TableHead className="min-w-[60px] text-center">O</TableHead>
                       <TableHead className="min-w-[60px] text-center">D</TableHead>
@@ -3032,12 +3049,8 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
                               onChange={e => setIfmeaRows(p => p.map((row, idx) => idx === i ? { ...row, failure_cause: e.target.value } : row))} />
                           </TableCell>
                           <TableCell className="py-2">
-                            <Input className="text-xs min-w-[160px]" value={r.effect_on_receiver}
-                              onChange={e => setIfmeaRows(p => p.map((row, idx) => idx === i ? { ...row, effect_on_receiver: e.target.value } : row))} />
-                          </TableCell>
-                          <TableCell className="py-2">
-                            <Input className="text-xs min-w-[130px]" value={r.effect_on_sender}
-                              onChange={e => setIfmeaRows(p => p.map((row, idx) => idx === i ? { ...row, effect_on_sender: e.target.value } : row))} />
+                            <Input className="text-xs min-w-[200px]" value={r.failure_effect}
+                              onChange={e => setIfmeaRows(p => p.map((row, idx) => idx === i ? { ...row, failure_effect: e.target.value } : row))} />
                           </TableCell>
                           <TableCell className="text-center py-2">
                             <Input type="number" min={1} max={10} className="w-14 text-xs text-center"

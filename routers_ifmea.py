@@ -190,13 +190,14 @@ def interface_causes_bulk(req: InterfaceCauseBulkRequest):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class InterfaceEffectRow(BaseModel):
-    row_id:           str
-    from_element:     str
-    to_element:       str
-    connection_type:  str
-    nominal_transfer: str
-    failure_mode:     str   # DFMEA failure mode (reused)
-    interface_cause:  str   # the specific interface cause generated above
+    row_id:                   str
+    from_element:             str
+    to_element:               str
+    connection_type:          str
+    nominal_transfer:         str
+    failure_mode:             str
+    interface_cause:          str
+    higher_element_functions: list[str] = []
 
 
 class InterfaceEffectsBulkRequest(BaseModel):
@@ -205,7 +206,22 @@ class InterfaceEffectsBulkRequest(BaseModel):
 
 def generate_interface_effects(row: InterfaceEffectRow) -> dict:
     conn_desc = CONN_DESCRIPTIONS.get(row.connection_type, row.connection_type)
-    prompt = f"""TASK: Generate Interface Failure Effects.
+
+    if row.higher_element_functions:
+        fns_text = "\n".join(f"  - {fn}" for fn in row.higher_element_functions)
+        effect_instruction = f"""The higher-level element has these functions:
+{fns_text}
+
+State which of these functions is degraded or lost because the interface
+cause prevents correct transfer. Name the specific function and describe
+the impact in one sentence."""
+    else:
+        effect_instruction = (
+            "Describe which higher-level function is degraded or lost "
+            "because the interface cause prevents correct transfer. One sentence."
+        )
+
+    prompt = f"""TASK: Generate the failure effect on the higher-level function.
 
 Interface FROM  : {row.from_element}
 Interface TO    : {row.to_element}
@@ -214,28 +230,22 @@ Transferred     : {row.nominal_transfer}
 Failure mode    : "{row.failure_mode}"
 Interface cause : "{row.interface_cause}"
 
-Generate TWO effects:
+{effect_instruction}
 
-1. EFFECT ON RECEIVING ELEMENT ({row.to_element}):
-   What function is lost or degraded because of this interface cause?
-
-2. EFFECT ON SENDING ELEMENT ({row.from_element}):
-   What happens due to changed load, back-pressure, or loss of feedback?
-   Use "No significant effect on sending element" if truly none.
-
-Each effect is ONE sentence describing functional impact.
+RULES:
+- ONE sentence only
+- Name the specific higher-level function affected
+- Describe functional impact, not just "it fails"
 
 OUTPUT: Valid JSON only, no markdown.
-{{
-  "effect_on_receiver": "<one sentence>",
-  "effect_on_sender":   "<one sentence>"
-}}
+{{"failure_effect": "<one sentence naming the higher function and its impact>"}}
 """
-    raw = llm.generate(prompt, max_tokens=300)
+    raw = llm.generate(prompt, max_tokens=200)
     try:
-        return json.loads(_strip_json(raw))
+        result = json.loads(_strip_json(raw))
+        return {"failure_effect": result.get("failure_effect", raw[:200].strip())}
     except Exception:
-        return {"effect_on_receiver": raw[:200].strip(), "effect_on_sender": "Could not parse"}
+        return {"failure_effect": raw[:200].strip()}
 
 
 @router.post("/interface-effects/bulk")
@@ -244,9 +254,8 @@ def interface_effects_bulk(req: InterfaceEffectsBulkRequest):
     for row in req.rows:
         effects = generate_interface_effects(row)
         results.append({
-            "row_id":             row.row_id,
-            "effect_on_receiver": effects.get("effect_on_receiver", ""),
-            "effect_on_sender":   effects.get("effect_on_sender",   ""),
+            "row_id":        row.row_id,
+            "failure_effect": effects.get("failure_effect", ""),
         })
     return {"results": results}
 
@@ -270,9 +279,10 @@ S=1  No discernible effect.
 
 
 class InterfaceSeverityRow(BaseModel):
-    row_id:             str
-    to_element:         str
-    effect_on_receiver: str
+    row_id:                   str
+    to_element:               str
+    failure_effect:           str
+    higher_element_functions: list[str] = []
 
 
 class InterfaceSeverityBulkRequest(BaseModel):
@@ -283,13 +293,16 @@ class InterfaceSeverityBulkRequest(BaseModel):
 def interface_severity_bulk(req: InterfaceSeverityBulkRequest):
     results = []
     for row in req.rows:
-        if not row.effect_on_receiver.strip():
+        if not row.failure_effect.strip():
             results.append({"row_id": row.row_id, "severity_rank": 5, "reason": "No effect provided"})
             continue
-        prompt = f"""Rate severity of this interface failure effect.
+        higher_ctx = ""
+        if row.higher_element_functions:
+            higher_ctx = f"\nHigher-level functions: {', '.join(row.higher_element_functions)}"
+        prompt = f"""Rate severity of this interface failure effect on the higher-level function.
 
-Receiving element: {row.to_element}
-Effect: "{row.effect_on_receiver}"
+Higher element: {row.to_element}{higher_ctx}
+Failure effect: "{row.failure_effect}"
 
 {SEVERITY_RUBRIC}
 

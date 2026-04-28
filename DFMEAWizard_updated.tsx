@@ -137,9 +137,7 @@ type IFMEAInterface = {
   nominalTransfer: string;   // user-typed: what is transferred
   focusFns:        string[]; // selected focus function names (multi-select)
   focusFnIds:      string[]; // selected focus function ids
-  modes:           IFMEAModeRec[];
-  modesLoading:    boolean;
-  modesGenerated:  boolean;
+  selectedModes:   string[]; // DFMEA failure modes selected for this interface
 };
 
 type IFMEAModeRec = {
@@ -1187,8 +1185,7 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
       return bConns.map(conn => existing[conn.id] ?? {
         id: conn.id, fromElement: nameOf(conn.fromKey), toElement: nameOf(conn.toKey),
         connType: conn.type, nominalTransfer: "",
-        focusFns: [], focusFnIds: [],
-        modes: [], modesLoading: false, modesGenerated: false,
+        focusFns: [], focusFnIds: [], selectedModes: [],
       });
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1405,13 +1402,33 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
     setIfmeaInterfaces(p => p.map(i => {
       if (i.id !== ifaceId) return i;
       const already = i.focusFnIds.includes(ffId);
+      // When removing a focus function, also remove its modes from selectedModes
+      let newSelectedModes = i.selectedModes;
+      if (already) {
+        const modesForFn = Array.from(modesByFocus[ffId]?.selected ?? []);
+        newSelectedModes = i.selectedModes.filter(m => !modesForFn.includes(m));
+      }
       return {
         ...i,
-        focusFnIds: already ? i.focusFnIds.filter(id => id !== ffId) : [...i.focusFnIds, ffId],
-        focusFns:   already ? i.focusFns.filter(n => n !== ff.name)  : [...i.focusFns,   ff.name],
+        focusFnIds:    already ? i.focusFnIds.filter(id => id !== ffId) : [...i.focusFnIds, ffId],
+        focusFns:      already ? i.focusFns.filter(n => n !== ff.name)  : [...i.focusFns,   ff.name],
+        selectedModes: newSelectedModes,
       };
     }));
   };
+
+  // Toggle a DFMEA failure mode in/out of an interface's selected modes
+  const toggleIfmeaSelectedMode = (ifaceId: string, mode: string) =>
+    setIfmeaInterfaces(p => p.map(i => {
+      if (i.id !== ifaceId) return i;
+      const already = i.selectedModes.includes(mode);
+      return {
+        ...i,
+        selectedModes: already
+          ? i.selectedModes.filter(m => m !== mode)
+          : [...i.selectedModes, mode],
+      };
+    }));
 
   const fetchIfmeaModes = async (iface: IFMEAInterface) => {
     setIfmeaInterfaces(p => p.map(i => i.id === iface.id ? { ...i, modesLoading: true } : i));
@@ -1447,15 +1464,18 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
       Object.entries(noiseFromPDiagram).map(([k, arr]) => [k, arr.filter(Boolean)])
     );
     for (const iface of ifmeaInterfaces) {
-      const selectedModes = iface.modes.filter(m => m.selected).map(m => m.mode);
-      if (!selectedModes.length || !iface.nominalTransfer.trim()) continue;
+      if (!iface.selectedModes.length || !iface.nominalTransfer.trim()) continue;
       try {
         const r = await fetch(`${apiBase}/api/ifmea/interface-causes/bulk`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            from_element: iface.fromElement, to_element: iface.toElement,
-            connection_type: iface.connType, nominal_transfer: iface.nominalTransfer,
-            failure_modes: selectedModes, noise_factors: cleanNoise,
+            from_element:        iface.fromElement,
+            to_element:          iface.toElement,
+            connection_type:     iface.connType,
+            nominal_transfer:    iface.nominalTransfer,
+            focus_function:      iface.focusFns.join(", "),
+            dfmea_failure_modes: iface.selectedModes,
+            noise_factors:       cleanNoise,
           }),
         });
         const data = await r.json();
@@ -2163,28 +2183,40 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
             </div>
           )}
 
-          {/* ── Phase 1: Describe + generate failure modes ── */}
+          {/* ── Phase 1: Set up interfaces — select focus functions + failure modes ── */}
           {ifmeaPhase === "modes" && (
             <div className="space-y-4">
               <p className="text-xs text-muted-foreground">
-                For each interface, describe what is nominally transferred, then generate interface failure modes.
+                For each interface: describe what is transferred, select which focus function(s)
+                it supports, then pick the DFMEA failure modes that apply to this interface.
+                No generation needed — these are the same failure modes from Step 6.
               </p>
               {ifmeaInterfaces.map(iface => {
                 const meta = CONN_META[iface.connType];
-                const selectedCount = iface.modes.filter(m => m.selected).length;
                 return (
                   <Card key={iface.id} className="border">
-                    <CardContent className="p-4 space-y-3">
+                    <CardContent className="p-4 space-y-4">
+
+                      {/* Header */}
                       <div className="flex items-center gap-3 flex-wrap">
-                        <span className="px-2 py-0.5 rounded text-xs font-bold text-white" style={{ background: meta.color }}>{iface.connType}</span>
+                        <span className="px-2 py-0.5 rounded text-xs font-bold text-white"
+                          style={{ background: meta.color }}>{iface.connType}</span>
                         <span className="font-semibold text-sm">{iface.fromElement}</span>
                         <ArrowRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                         <span className="font-semibold text-sm">{iface.toElement}</span>
                         <span className="text-xs text-muted-foreground">({meta.label})</span>
-                        {selectedCount > 0 && <Badge variant="default" className="ml-auto">{selectedCount} modes selected</Badge>}
+                        {iface.selectedModes.length > 0 && (
+                          <Badge variant="default" className="ml-auto">
+                            {iface.selectedModes.length} mode{iface.selectedModes.length > 1 ? "s" : ""} selected
+                          </Badge>
+                        )}
                       </div>
+
+                      {/* Nominal transfer */}
                       <div className="space-y-1">
-                        <Label className="text-xs font-semibold">What is nominally transferred through this interface?</Label>
+                        <Label className="text-xs font-semibold">
+                          What is nominally transferred through this interface?
+                        </Label>
                         <Input className="text-sm"
                           placeholder={
                             iface.connType === "P" ? "e.g. Axial load 0–50 kN via spline coupling"
@@ -2195,29 +2227,85 @@ function DFMEAWizard({ initialState }: { initialState?: WizardInitialState }) {
                           value={iface.nominalTransfer}
                           onChange={e => updateIfmeaTransfer(iface.id, e.target.value)} />
                       </div>
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between">
-                          <Label className="text-xs font-semibold">Interface failure modes</Label>
-                          <Button size="sm" variant="secondary"
-                            disabled={iface.modesLoading || !iface.nominalTransfer.trim()}
-                            onClick={() => fetchIfmeaModes(iface)}>
-                            {iface.modesLoading ? <><Loader2 className="h-3 w-3 mr-1 animate-spin" />Generating…</> : "Generate modes"}
-                          </Button>
-                        </div>
-                        {!iface.modesGenerated && !iface.modesLoading && (
-                          <p className="text-xs text-muted-foreground italic">Fill in nominal transfer above, then click Generate modes.</p>
-                        )}
-                        {iface.modes.length > 0 && (
-                          <div className="space-y-1.5">
-                            {iface.modes.map(m => (
-                              <label key={m.id} className={`flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer text-sm transition-all ${m.selected ? "border-primary bg-primary/5" : "border-border hover:bg-muted/30"}`}>
-                                <Checkbox className="mt-0.5 shrink-0" checked={m.selected} onCheckedChange={() => toggleIfmeaMode(iface.id, m.id)} />
-                                <span className="leading-snug">{m.mode}</span>
-                              </label>
-                            ))}
+
+                      {/* Focus function multi-selector */}
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold">
+                          Which focus function(s) does this interface support?
+                          <span className="text-muted-foreground font-normal ml-1">(select all that apply)</span>
+                        </Label>
+                        {focusFunctions.length === 0 ? (
+                          <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                            No focus functions defined yet — go to Step 3 first.
+                          </p>
+                        ) : (
+                          <div className="flex flex-wrap gap-2">
+                            {focusFunctions.map(ff => {
+                              const isSelected = iface.focusFnIds.includes(ff.id);
+                              const modeCount = modesByFocus[ff.id]?.selected.size ?? 0;
+                              return (
+                                <button key={ff.id} type="button"
+                                  onClick={() => toggleIfmeaFocusFn(iface.id, ff.id)}
+                                  className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-all ${
+                                    isSelected
+                                      ? "bg-primary text-primary-foreground border-primary"
+                                      : "bg-white text-gray-600 border-gray-300 hover:border-primary/40"
+                                  }`}>
+                                  {isSelected && <CheckCircle2 className="h-3 w-3 shrink-0" />}
+                                  <span>{ff.name}</span>
+                                  {modeCount > 0 && (
+                                    <span className={`text-[10px] px-1 rounded ${isSelected ? "bg-white/20" : "bg-gray-100"}`}>
+                                      {modeCount} mode{modeCount > 1 ? "s" : ""}
+                                    </span>
+                                  )}
+                                </button>
+                              );
+                            })}
                           </div>
                         )}
                       </div>
+
+                      {/* DFMEA failure modes — shown per selected focus function, user picks which apply */}
+                      {iface.focusFnIds.length > 0 && (
+                        <div className="space-y-2">
+                          <Label className="text-xs font-semibold">
+                            Select which failure modes apply to this interface
+                            <span className="text-muted-foreground font-normal ml-1">
+                              (from DFMEA Step 6 — same modes, different causal path through the interface)
+                            </span>
+                          </Label>
+                          {iface.focusFnIds.map(ffId => {
+                            const ff = focusFunctions.find(f => f.id === ffId);
+                            const modes = Array.from(modesByFocus[ffId]?.selected ?? []);
+                            if (!modes.length) return (
+                              <div key={ffId} className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                                No failure modes selected for "{ff?.name}" yet — go to Step 6 first.
+                              </div>
+                            );
+                            return (
+                              <div key={ffId} className="space-y-1">
+                                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">
+                                  {ff?.name}
+                                </p>
+                                {modes.map((mode, mi) => {
+                                  const isChecked = iface.selectedModes.includes(mode);
+                                  return (
+                                    <label key={mi}
+                                      className={`flex items-start gap-2 p-2.5 rounded-lg border cursor-pointer text-sm transition-all ${
+                                        isChecked ? "border-primary bg-primary/5" : "border-border hover:bg-muted/30"
+                                      }`}>
+                                      <Checkbox className="mt-0.5 shrink-0" checked={isChecked}
+                                        onCheckedChange={() => toggleIfmeaSelectedMode(iface.id, mode)} />
+                                      <span className="leading-snug text-gray-700">{mode}</span>
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
                     </CardContent>
                   </Card>
                 );
